@@ -1,0 +1,18 @@
+,Feature,Importance
+0,IDW Pb,0.2298
+1,IDW Fe,0.2049
+2,CNN All Rasters,0.1421
+3,IDW Cd,0.1228
+4,IDW Ni,0.0538
+5,IDW Silt,0.0468
+6,IDW Cu,0.046
+7,Hydro Dist Ind,0.0314
+8,IDW As,0.0191
+9,IDW Moisture,0.007
+10,Hydro Dist Brick,0.0069
+11,IDW Sand,0.0052
+12,IDW Clay,0.0049
+13,IDW Cr,0.0041
+14,Num Industry,0.0012
+15,GNN Distance Matrix,0.0001
+16,Num Brick Field,-0.0008

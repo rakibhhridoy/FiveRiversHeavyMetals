@@ -1,0 +1,5 @@
+# Ignore all Keras model files
+*.keras
+
+# Ignore the specific directory with large files
+gis/SedimentWinter/models/cnn_gnn_mlp_pg/*.keras

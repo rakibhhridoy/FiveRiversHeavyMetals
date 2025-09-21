@@ -1,0 +1,25 @@
+,Feature,Importance
+0,IDW Cd,0.2251
+1,Ni,0.0752
+2,IDW Ni,0.0664
+3,Pb,0.058
+4,Cd,0.0561
+5,Silt,0.0473
+6,IDW Cu,0.0375
+7,IDW Silt,0.0366
+8,IDW Pb,0.0298
+9,IDW Clay,0.0295
+10,Fe,0.0221
+11,Moisture,0.0179
+12,Cu,0.016
+13,IDW Cr,0.0135
+14,IDW As,0.0088
+15,Clay,0.006
+16,Sand,0.0058
+17,Hydro Dist Ind,3.4e-05
+18,Hydro Dist Brick,-0.0
+19,Num Brick Field,-0.0004
+20,As,-0.0028
+21,Num Industry,-0.003
+22,Cr,-0.0037
+23,IDW Sand,-0.0071

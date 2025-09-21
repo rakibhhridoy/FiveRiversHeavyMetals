@@ -1,0 +1,18 @@
+,Feature,Importance
+0,MLP Branch Overall,2.103926
+1,IDW Pb,0.321333
+2,IDW Cu,0.116045
+3,IDW Ni,0.10353
+4,IDW Cd,0.042671
+5,IDW Clay,0.036134
+6,IDW As,0.028143
+7,Num Industry,0.014462
+8,IDW Cr,0.00807
+9,IDW Silt,0.002536
+10,GNN Branch Overall,0.000632
+11,Moisture,0.000575
+12,Hydro Dist Brick,-0.0
+13,Hydro Dist Ind,-0.0
+14,IDW Sand,-0.003032
+15,Num Brick Field,-0.008298
+16,IDW Fe,-0.013229
