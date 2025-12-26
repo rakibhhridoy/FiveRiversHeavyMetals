@@ -1,0 +1,36 @@
+/Users/rakibhhridoy/Library/Python/3.9/lib/python/site-packages/google/api_core/_python_version_support.py:252: FutureWarning: You are using a Python version (3.9.6) past its end of life. Google will update google.api_core with critical bug fixes on a best-effort basis, but not with any other fixes or features. Please upgrade to the latest Python version, or at least Python 3.10, and then update google.api_core.
+  warnings.warn(message, FutureWarning)
+/Users/rakibhhridoy/Library/Python/3.9/lib/python/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+An error occurred: module 'importlib.metadata' has no attribute 'packages_distributions'
+
+================================================================================
+RUNNING TOP 5 RAINY SEASON MODELS WITH ALPHAEARTH
+Single Train/Test Split (80/20)
+================================================================================
+
+================================================================================
+LOADING DATA
+================================================================================
+Loading: /Users/rakibhhridoy/Five_Rivers/gis/SedimentRainyAE/Option_B_RainyAE.csv
+  ✓ Loaded 17 samples with 85 features
+  Features: 79
+  Samples: 17
+  Target range: 81.26 - 386.12
+
+Loading raster layers...
+  ✓ Found 0 raster layers
+
+================================================================================
+TRAIN/TEST SPLIT
+================================================================================
+Training samples: 13
+Test samples: 4
+
+Preparing MLP/GNN data...
+Traceback (most recent call last):
+  File "/Users/rakibhhridoy/Five_Rivers/run_top5_models_simple.py", line 508, in <module>
+    main()
+  File "/Users/rakibhhridoy/Five_Rivers/run_top5_models_simple.py", line 385, in main
+    with rasterio.open(raster_paths[0]) as src:
+IndexError: list index out of range

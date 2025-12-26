@@ -1,0 +1,272 @@
+================================================================================
+ALPHAEARTH INTEGRATION - TOP 5 MODELS ONLY
+================================================================================
+
+Optimized setup to test only the best-performing models from each season.
+
+================================================================================
+TOP 5 MODELS SELECTED
+================================================================================
+
+RAINY SEASON (by R² performance):
+  1. Transformer CNN GNN MLP       (R² = 0.9604, RMSE = 15.74)
+  2. GNN MLP AE                    (R² = 0.9581, RMSE = 15.89)
+  3. CNN GNN MLP PG                (R² = 0.957, RMSE = 16.39)
+  4. GNN MLP                       (R² = 0.9519, RMSE = 17.33)
+  5. Stacked CNN GNN MLP           (R² = 0.924, RMSE = 21.80)
+
+WINTER SEASON (by R² performance):
+  1. Transformer CNN GNN MLP       (R² = 0.9721, RMSE = 7.99)
+  2. GNN MLP AE                    (R² = 0.9718, RMSE = 8.04)
+  3. Mixture of Experts            (R² = 0.97, RMSE = 13.71)
+  4. Stacked CNN GNN MLP           (R² = 0.9685, RMSE = 14.04)
+  5. GNN MLP                       (R² = 0.9705, RMSE = 11.08)
+
+Why only top 5?
+  ✓ 55% fewer models to test (5 vs 11)
+  ✓ 55% less computation time
+  ✓ Focus on proven winners
+  ✓ Still comprehensive analysis with 4 AlphaEarth options
+
+================================================================================
+QUICK START
+================================================================================
+
+STEP 1: Prepare Data (30 minutes)
+  cd /Users/rakibhhridoy/Five_Rivers/
+  ./run_top5_alphaearth.sh data-both
+
+STEP 2: Run Top 5 Models with Option B (20-40 hours)
+  ./run_top5_alphaearth.sh quick
+
+  This runs:
+  - 5 rainy models × Option B
+  - 5 winter models × Option B
+  - Both seasons in parallel if desired
+
+STEP 3: Check Results
+  Results in: /gis/SedimentRainyAE/ and /gis/SedimentWinterAE/
+  Feature importance: */FeatureImportance/ directories
+  Saved models: */models/ directories
+
+================================================================================
+COMMANDS REFERENCE
+================================================================================
+
+Help:
+  ./run_top5_alphaearth.sh --help
+
+Data Preparation:
+  ./run_top5_alphaearth.sh data-rainy      # Rainy season only
+  ./run_top5_alphaearth.sh data-winter     # Winter season only
+  ./run_top5_alphaearth.sh data-both       # Both seasons
+
+Quick Test (1 model, 2-4 hours):
+  ./run_top5_alphaearth.sh test
+
+Recommended - Option B (20-40 hours):
+  ./run_top5_alphaearth.sh quick           # Both seasons, Option B
+
+By Season with Different Options:
+  ./run_top5_alphaearth.sh rainy-option-a   # Rainy + Option A
+  ./run_top5_alphaearth.sh rainy-option-b   # Rainy + Option B (RECOMMENDED)
+  ./run_top5_alphaearth.sh rainy-option-c   # Rainy + Option C
+  ./run_top5_alphaearth.sh rainy-option-d   # Rainy + Option D
+
+  ./run_top5_alphaearth.sh winter-option-a  # Winter + Option A
+  ./run_top5_alphaearth.sh winter-option-b  # Winter + Option B (RECOMMENDED)
+  ./run_top5_alphaearth.sh winter-option-c  # Winter + Option C
+  ./run_top5_alphaearth.sh winter-option-d  # Winter + Option D
+
+Python Script (Advanced):
+  python3 RUN_ALPHAEARTH_TOP5.py --help
+  python3 RUN_ALPHAEARTH_TOP5.py --season rainy --option B
+  python3 RUN_ALPHAEARTH_TOP5.py --season both --option all
+
+================================================================================
+4 ALPHAEARTH OPTIONS EXPLAINED
+================================================================================
+
+When running scripts, you test one of these 4 integration approaches:
+
+OPTION A: Replace Indices (Simple)
+  - Remove manual spectral indices
+  - Replace with 64 AlphaEarth bands
+  - Expected gain: +2-5% (rainy), +1-3% (winter)
+  - Use when: Want simplest integration
+
+OPTION B: Add to Features (RECOMMENDED ⭐)
+  - Keep all existing data
+  - Add 64 AlphaEarth bands
+  - CNN: 86-88 channels (from 25)
+  - Expected gain: +3-6% (rainy), +2-4% (winter)
+  - Use when: Want best performance + richest features
+
+OPTION C: PCA-Reduced (Efficient)
+  - Keep existing data
+  - Add PCA-reduced AlphaEarth (20 components)
+  - CNN: 42-44 channels
+  - Expected gain: +2-4% (rainy), +1-3% (winter)
+  - Use when: Memory-constrained or want faster training
+
+OPTION D: MLP Enhancement (Minimal)
+  - CNN input unchanged
+  - Add AlphaEarth stats to MLP only
+  - CNN: 25 channels (unchanged)
+  - Expected gain: +0.5-2% (rainy), +0.3-1% (winter)
+  - Use when: Want minimal code changes
+
+Recommendation: Start with Option B (best balance)
+
+================================================================================
+EXECUTION TIMELINE
+================================================================================
+
+Quick Test:
+  Time: 2-4 hours
+  Command: ./run_top5_alphaearth.sh test
+  What: Transformer CNN GNN MLP, Option B, Rainy season
+  Use for: Verify everything works before longer runs
+
+Standard (Recommended):
+  Time: 20-40 hours total
+  Command: ./run_top5_alphaearth.sh quick
+  What: Top 5 models × 2 seasons × Option B
+  Use for: Complete comparative analysis with best option
+
+Extended:
+  Time: 40-80 hours total
+  Commands:
+    ./run_top5_alphaearth.sh rainy-option-a
+    ./run_top5_alphaearth.sh rainy-option-b
+    ./run_top5_alphaearth.sh rainy-option-c
+    ./run_top5_alphaearth.sh rainy-option-d
+    (Same for winter-option-*)
+  What: Top 5 models × 2 seasons × all 4 options
+  Use for: Full comparative analysis of all approaches
+
+================================================================================
+FILES CREATED
+================================================================================
+
+Scripts in Project Root:
+  ✓ run_top5_alphaearth.sh (Shell - easy to use)
+  ✓ RUN_ALPHAEARTH_TOP5.py (Python - full control)
+
+Notebooks (Already created):
+  ✓ /gis/SedimentRainyAE/ (12 notebooks: 1 data prep + 11 models)
+  ✓ /gis/SedimentWinterAE/ (11 model notebooks)
+
+All 22 notebooks include:
+  ✓ AlphaEarth integration cells
+  ✓ ALPHA_EARTH_OPTION = 'B' (configurable)
+  ✓ Automatic data loading from CSV files
+
+================================================================================
+EXAMPLE WORKFLOWS
+================================================================================
+
+Workflow 1: Quick Verification (6-8 hours total)
+  1. ./run_top5_alphaearth.sh data-both        (30 min)
+  2. ./run_top5_alphaearth.sh test             (2-4 hours)
+  3. Check results in notebook output
+  4. Decide if ready for full run
+
+Workflow 2: Best Results (20-40 hours)
+  1. ./run_top5_alphaearth.sh data-both        (30 min)
+  2. ./run_top5_alphaearth.sh quick            (20-40 hours)
+  3. All top 5 models tested with Option B
+  4. Ready to write article with results
+
+Workflow 3: All Options (40-80 hours)
+  1. ./run_top5_alphaearth.sh data-both        (30 min)
+  2. ./run_top5_alphaearth.sh rainy-option-a   (5-10 hours)
+  3. ./run_top5_alphaearth.sh rainy-option-b   (5-10 hours)
+  4. ./run_top5_alphaearth.sh rainy-option-c   (5-10 hours)
+  5. ./run_top5_alphaearth.sh rainy-option-d   (5-10 hours)
+  6. ./run_top5_alphaearth.sh winter-option-a  (5-10 hours)
+  7. ./run_top5_alphaearth.sh winter-option-b  (5-10 hours)
+  8. ./run_top5_alphaearth.sh winter-option-c  (5-10 hours)
+  9. ./run_top5_alphaearth.sh winter-option-d  (5-10 hours)
+  Complete analysis with all approaches
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+"Module earthengine not found"
+  → pip install earthengine-api
+  → python -m earthengine authenticate
+
+"AlphaEarth option file not found"
+  → Make sure you ran: ./run_top5_alphaearth.sh data-both
+  → Check files exist in /gis/SedimentRainyAE/ (case sensitive)
+
+"Out of memory"
+  → Modify notebook batch size: 32 → 16
+  → Use Option C instead of B
+
+"GCP project not set"
+  → Create free project: console.cloud.google.com
+  → Set project: gcloud config set project YOUR_PROJECT
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+RIGHT NOW:
+  1. Ensure Google Earth Engine is set up
+  2. Run: ./run_top5_alphaearth.sh --help
+  3. Run: ./run_top5_alphaearth.sh data-both
+
+OPTION A: Quick Test First (2-4 hours)
+  ./run_top5_alphaearth.sh test
+  (Good to verify everything works)
+
+OPTION B: Go Straight to Recommended (20-40 hours)
+  ./run_top5_alphaearth.sh quick
+  (Tests top 5 models, both seasons, Option B)
+
+OPTION C: Run by Season Separately
+  ./run_top5_alphaearth.sh rainy-option-b
+  ./run_top5_alphaearth.sh winter-option-b
+  (Same as quick, but more control)
+
+THEN:
+  - Check results in model output directories
+  - Update article with findings
+  - Report performance improvements
+
+================================================================================
+KEY BENEFITS OF THIS APPROACH
+================================================================================
+
+✓ 55% faster than testing all 11 models
+✓ Focus on proven high-performers
+✓ Easier to interpret results (fewer comparisons)
+✓ Still comprehensive with 4 AlphaEarth options
+✓ Can still run all 11 if desired (original scripts still available)
+✓ Season-specific top 5 for rainy and winter differences
+
+================================================================================
+SUCCESS CRITERIA
+================================================================================
+
+You'll know it's working when you see:
+  1. ✓ Data files created (Option_A/B/C/D_RainyAE.csv)
+  2. ✓ Models running (messages in terminal)
+  3. ✓ Metrics calculated (R², RMSE, etc.)
+  4. ✓ Results saved in notebook outputs
+  5. ✓ Feature importance analysis completed
+  6. ✓ Reports generated
+
+================================================================================
+
+Everything is ready! Start with:
+  cd /Users/rakibhhridoy/Five_Rivers/
+  ./run_top5_alphaearth.sh data-both
+
+Then:
+  ./run_top5_alphaearth.sh quick
+
+Good luck! 🚀

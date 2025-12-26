@@ -1,0 +1,320 @@
+================================================================================
+ALPHAEARTH DATA VISUALIZATION - QUICK START GUIDE
+================================================================================
+
+OVERVIEW
+--------
+AlphaEarth provides 64-dimensional satellite embeddings from Google DeepMind.
+This guide shows how to visualize all 64 features as raster files.
+
+================================================================================
+THREE WAYS TO VISUALIZE ALPHAEARTH DATA
+================================================================================
+
+METHOD 1: EXPORT FROM GOOGLE EARTH ENGINE (Recommended)
+======================================================
+
+Step 1: Export data
+  python3 /Users/rakibhhridoy/Five_Rivers/ALPHAEARTH_EXPORT_GEE.py
+
+Step 2: Monitor export in Google Drive
+  - Look for "Five_Rivers" folder
+  - File: AlphaEarth_64_Bands_Full.tif (~500MB-1GB)
+
+Step 3: Download to local machine
+  - Save to: /Users/rakibhhridoy/Five_Rivers/gis/AlphaEarth/
+  - Create folder if needed: mkdir -p gis/AlphaEarth/
+
+Step 4: Run visualizations
+  python3 /Users/rakibhhridoy/Five_Rivers/ALPHAEARTH_VISUALIZE.py
+
+Step 5: View results
+  - Open: /Users/rakibhhridoy/Five_Rivers/gis/visualizations/
+  - View PNG files with any image viewer
+
+FILES GENERATED:
+  ✓ all_64_bands.png (8×8 grid of all 64 bands)
+  ✓ pca_composite.png (RGB visualization of 64 dimensions)
+  ✓ band_statistics.png (mean, std dev, min/max analysis)
+  ✓ band_correlation_full.png (64×64 correlation matrix)
+  ✓ band_correlation_subset.png (16×16 subset for clarity)
+  ✓ selected_bands.png (detailed view of key bands)
+  ✓ AlphaEarth_PCA3.tif (3-band GeoTIFF for GIS software)
+
+================================================================================
+
+METHOD 2: VISUALIZATION WITH EXISTING DATA
+==========================================
+
+If you already have AlphaEarth raster file:
+
+Step 1: Place raster file
+  cp your_alphaearth.tif /Users/rakibhhridoy/Five_Rivers/gis/AlphaEarth/
+
+Step 2: Update script path (optional)
+  Edit ALPHAEARTH_VISUALIZE.py, line ~250:
+  raster_path = '/path/to/your/AlphaEarth_64_Bands.tif'
+
+Step 3: Run visualization
+  python3 /Users/rakibhhridoy/Five_Rivers/ALPHAEARTH_VISUALIZE.py
+
+================================================================================
+
+METHOD 3: PYTHON SCRIPT (Advanced)
+==================================
+
+Create a Python script with visualization functions:
+
+```python
+import rasterio
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+
+# Load raster
+raster_path = '/Users/rakibhhridoy/Five_Rivers/gis/AlphaEarth/AlphaEarth_64_Bands.tif'
+
+with rasterio.open(raster_path) as src:
+    data = src.read()  # Load all 64 bands
+    h, w = data.shape[1], data.shape[2]
+
+    # 1. VIEW SINGLE BAND
+    band_1 = src.read(1)
+    plt.imshow(band_1, cmap='viridis')
+    plt.title('Band 1')
+    plt.colorbar()
+    plt.savefig('band_1.png')
+
+    # 2. CREATE PCA COMPOSITE (RGB)
+    data_flat = data.transpose(1,2,0).reshape(-1, 64)
+    scaler = StandardScaler()
+    data_scaled = scaler.fit_transform(data_flat)
+
+    pca = PCA(n_components=3)
+    pca_data = pca.fit_transform(data_scaled)
+    pca_img = pca_data.reshape(h, w, 3)
+
+    # Normalize to 0-1
+    pca_norm = (pca_img - pca_img.min()) / (pca_img.max() - pca_img.min())
+
+    plt.imshow(pca_norm)
+    plt.title('PCA Composite (3 Principal Components)')
+    plt.savefig('pca_composite.png')
+```
+
+================================================================================
+UNDERSTANDING THE VISUALIZATIONS
+================================================================================
+
+1. all_64_bands.png
+   - 8×8 grid showing all 64 AlphaEarth bands
+   - Each band represents different satellite data characteristics
+   - Bands with similar patterns are correlated
+   - Use this to identify dominant features
+
+2. pca_composite.png
+   - RGB image created from 3 principal components
+   - Reduces 64 dimensions to 3 (Red, Green, Blue)
+   - Preserves ~80-90% of variance
+   - Best for quick visualization and interpretation
+
+3. band_statistics.png
+   - Mean value per band (top-left)
+   - Standard deviation per band (top-right)
+   - Min/Max ranges (bottom-left)
+   - Distribution histogram (bottom-right)
+   - Identify bands with high/low variance
+
+4. band_correlation_full.png
+   - 64×64 correlation matrix
+   - Shows relationships between all bands
+   - Warm colors (red) = positive correlation
+   - Cool colors (blue) = negative correlation
+   - Identify redundant bands
+
+5. selected_bands.png
+   - Detailed view of key bands (1, 2, 3, 4, 5, 10, 20, 30, 40, 50)
+   - Good for publication figures
+   - Shows spatial variation across bands
+
+6. AlphaEarth_PCA3.tif
+   - 3-band GeoTIFF file
+   - Can be imported into ArcGIS, QGIS, etc.
+   - Use with GIS software for geospatial analysis
+
+================================================================================
+FILE SPECIFICATIONS
+================================================================================
+
+Input (AlphaEarth_64_Bands.tif):
+  - Bands: 64
+  - Resolution: 10m
+  - CRS: EPSG:4326 (WGS84)
+  - Data Type: Float32
+  - File Size: 500MB-1GB
+
+Output Files:
+  - PNG files: 5-50MB each
+  - GeoTIFF (PCA): ~25MB
+  - Total output: ~200-300MB
+
+Processing Time:
+  - Load raster: 30 seconds
+  - Generate all visualizations: 2-3 minutes
+  - Save files: 1-2 minutes
+  - TOTAL: ~5 minutes
+
+System Requirements:
+  - RAM: 4GB minimum, 8GB+ recommended
+  - Disk space: 1.5GB (raster + outputs)
+  - CPU: 2+ cores (Python uses single-threaded)
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+Problem: "ModuleNotFoundError: No module named 'rasterio'"
+Solution: pip3 install rasterio
+
+Problem: "File not found" error
+Solution: Make sure AlphaEarth file is in correct location:
+  /Users/rakibhhridoy/Five_Rivers/gis/AlphaEarth/AlphaEarth_64_Bands.tif
+
+Problem: Earth Engine export is very slow
+Solution:
+  - Reduce area of interest (AOI) size
+  - Use smaller spatial resolution (e.g., 20m instead of 10m)
+  - Export in multiple tiles
+
+Problem: Out of memory error
+Solution:
+  - Close other applications
+  - Increase available RAM
+  - Process smaller area
+  - Use GIS software (QGIS) for large rasters instead
+
+Problem: PCA composite looks blank
+Solution:
+  - Check if raster values are in expected range
+  - Verify all 64 bands are present
+  - Use percentile clipping (2nd to 98th)
+
+================================================================================
+INTERPRETATION TIPS
+================================================================================
+
+1. Band Interpretation:
+   - Each band captures different satellite information
+   - Optical bands: visible light characteristics
+   - SAR bands: radar scattering patterns
+   - Vegetation indices: plant health and density
+   - Topography: elevation and slopes
+
+2. Correlation Analysis:
+   - Highly correlated bands are redundant
+   - Uncorrelated bands add independent information
+   - Use correlation to select subset of bands
+
+3. PCA Results:
+   - PC1 usually captures ~30-40% of variance
+   - PC1+PC2 typically ~60-70% of variance
+   - PC1+PC2+PC3 usually ~80-90% of variance
+   - Remaining variance spread across PC4-PC64
+
+4. Feature Selection:
+   - Bands with high variance are important
+   - Low-variance bands are mostly noise
+   - Consider correlation when selecting bands
+   - Use PCA loadings to identify key bands
+
+================================================================================
+INTEGRATION WITH MODELS
+================================================================================
+
+For your Five Rivers project:
+
+1. All 64 AlphaEarth bands already in models:
+   - Option_B_RainyAE.csv (85 features: 21 original + 64 AlphaEarth)
+   - Option_B_WinterAE.csv (same structure)
+
+2. Feature Importance:
+   - Models show which bands are most important
+   - Use Permutation Feature Importance
+   - Identify which AlphaEarth dimensions matter most
+
+3. Visualization for Publication:
+   - Use pca_composite.png as figure
+   - Use band_statistics.png as supplementary
+   - Reference AlphaEarth dataset: Google DeepMind
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+1. Run Google Earth Engine export:
+   python3 /Users/rakibhhridoy/Five_Rivers/ALPHAEARTH_EXPORT_GEE.py
+
+2. Download raster from Google Drive:
+   - Go to Google Drive
+   - Find "Five_Rivers" folder
+   - Download AlphaEarth_64_Bands_Full.tif
+
+3. Run visualization:
+   python3 /Users/rakibhhridoy/Five_Rivers/ALPHAEARTH_VISUALIZE.py
+
+4. Explore results:
+   - open /Users/rakibhhridoy/Five_Rivers/gis/visualizations/
+   - View all PNG files
+   - Load AlphaEarth_PCA3.tif in QGIS
+
+5. Use in analysis:
+   - Model results show AlphaEarth feature importance
+   - Visualizations document the features
+   - Include in publications and presentations
+
+================================================================================
+DOCUMENTATION FILES
+================================================================================
+
+📄 ALPHAEARTH_VISUALIZATION_GUIDE.md
+   - Comprehensive guide with code examples
+   - Methods 1-7 for different approaches
+   - Complete Python scripts
+
+📄 ALPHAEARTH_VISUALIZE.py
+   - Ready-to-run visualization script
+   - Generates all visualizations automatically
+   - Well-documented class-based design
+
+📄 ALPHAEARTH_EXPORT_GEE.py
+   - Export script for Google Earth Engine
+   - Handles authentication and task monitoring
+   - Supports time series export
+
+📄 ALPHAEARTH_QUICKSTART.txt
+   - This file
+   - Quick reference guide
+
+================================================================================
+SUPPORT & RESOURCES
+================================================================================
+
+AlphaEarth Documentation:
+  https://developers.google.com/earth-engine/datasets/catalog/GOOGLE_SATELLITE_EMBEDDING_V1
+
+Google Earth Engine:
+  https://earthengine.google.com/
+
+QGIS (GIS Software):
+  https://www.qgis.org/
+
+Python Libraries:
+  - rasterio: Raster I/O
+  - scikit-learn: ML and PCA
+  - matplotlib: Visualization
+  - numpy/pandas: Data processing
+
+================================================================================
+END OF QUICKSTART GUIDE
+================================================================================

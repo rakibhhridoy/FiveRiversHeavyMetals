@@ -1,0 +1,17 @@
+
+================================================================================
+ALPHAEARTH TOP 5 MODELS - ANALYSIS REPORT
+================================================================================
+
+Execution Time: 0:00:04.937594
+
+Results (1 total):
+  error: 1
+
+By Season:
+  RAINY: 0/1 succeeded
+
+Failed Runs:
+  rainy Transformer CNN GNN MLP.ipynb OptB: [Errno 2] No such file or directory: 'ju
+
+================================================================================

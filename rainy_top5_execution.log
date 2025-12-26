@@ -1,0 +1,42 @@
+/Users/rakibhhridoy/Library/Python/3.9/lib/python/site-packages/google/api_core/_python_version_support.py:252: FutureWarning: You are using a Python version (3.9.6) past its end of life. Google will update google.api_core with critical bug fixes on a best-effort basis, but not with any other fixes or features. Please upgrade to the latest Python version, or at least Python 3.10, and then update google.api_core.
+  warnings.warn(message, FutureWarning)
+/Users/rakibhhridoy/Library/Python/3.9/lib/python/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+[2025-12-26 20:58:02] [INFO] Starting AlphaEarth Top 5 Models Analysis
+[2025-12-26 20:58:02] [INFO] Checking prerequisites...
+[2025-12-26 20:58:02] [INFO] ✓ jupyter installed
+An error occurred: module 'importlib.metadata' has no attribute 'packages_distributions'
+[2025-12-26 20:58:07] [INFO] ✓ tensorflow installed
+[2025-12-26 20:58:07] [INFO] ✓ pandas installed
+[2025-12-26 20:58:07] [INFO] ✓ numpy installed
+[2025-12-26 20:58:07] [INFO] ✓ earthengine-api installed
+[2025-12-26 20:58:07] [INFO] ✓ All prerequisites satisfied
+[2025-12-26 20:58:07] [INFO] Scheduling 5 model runs (Top 5 × 1 options × 1 seasons)
+[2025-12-26 20:58:07] [INFO] Running Rainy [Transformer CNN GNN MLP] Option B...
+[2025-12-26 20:58:07] [INFO] Running Rainy [GNN MLP AE] Option B...
+[2025-12-26 20:58:07] [INFO] Running Rainy [CNN GNN MLP PG] Option B...
+[2025-12-26 20:58:07] [INFO] Running Rainy [GNN MLP] Option B...
+[2025-12-26 20:58:07] [INFO] Running Rainy [Stacked CNN GNN MLP] Option B...
+
+================================================================================
+ALPHAEARTH TOP 5 MODELS - ANALYSIS REPORT
+================================================================================
+
+Execution Time: 0:00:05.272266
+
+Results (5 total):
+  error: 5
+
+By Season:
+  RAINY: 0/5 succeeded
+
+Failed Runs:
+  rainy Transformer CNN GNN MLP.ipynb OptB: [Errno 2] No such file or directory: 'ju
+  rainy GNN MLP AE.ipynb OptB: [Errno 2] No such file or directory: 'ju
+  rainy CNN GNN MLP PG.ipynb OptB: [Errno 2] No such file or directory: 'ju
+  rainy GNN MLP.ipynb OptB: [Errno 2] No such file or directory: 'ju
+  rainy Stacked CNN GNN MLP.ipynb OptB: [Errno 2] No such file or directory: 'ju
+
+================================================================================
+
+[2025-12-26 20:58:07] [INFO] Report saved: /Users/rakibhhridoy/Five_Rivers/claude_temp/ALPHAEARTH_TOP5_RESULTS_20251226_205807.txt

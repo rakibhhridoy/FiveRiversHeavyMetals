@@ -1,0 +1,21 @@
+
+================================================================================
+ALPHAEARTH TOP 5 MODELS - ANALYSIS REPORT
+================================================================================
+
+Execution Time: 0:28:27.123145
+
+Results (5 total):
+  failed: 5
+
+By Season:
+  RAINY: 0/5 succeeded
+
+Failed Runs:
+  rainy Transformer CNN GNN MLP.ipynb OptB: [NbConvertApp] Converting notebook /User
+  rainy GNN MLP AE.ipynb OptB: [NbConvertApp] Converting notebook /User
+  rainy CNN GNN MLP PG.ipynb OptB: [NbConvertApp] Converting notebook /User
+  rainy GNN MLP.ipynb OptB: [NbConvertApp] Converting notebook /User
+  rainy Stacked CNN GNN MLP.ipynb OptB: [NbConvertApp] Converting notebook /User
+
+================================================================================

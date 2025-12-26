@@ -1,0 +1,2191 @@
+/Users/rakibhhridoy/Library/Python/3.9/lib/python/site-packages/nbformat/__init__.py:96: MissingIDFieldWarning: Cell is missing an id field, this will become a hard error in future nbformat versions. You may want to use `normalize()` on your notebooks before validations (available since nbformat 5.1.4). Previous versions of nbformat are fixing this issue transparently, and will stop doing so in the future.
+  validate(nb)
+Traceback (most recent call last):
+  File "/Users/rakibhhridoy/Library/Python/3.9/lib/python/site-packages/jupyter_core/utils/__init__.py", line 154, in wrapped
+    asyncio.get_running_loop()
+RuntimeError: no running event loop
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/rakibhhridoy/Five_Rivers/direct_model_run.py", line 50, in run_notebook_direct
+    client.execute()
+  File "/Users/rakibhhridoy/Library/Python/3.9/lib/python/site-packages/jupyter_core/utils/__init__.py", line 158, in wrapped
+    return loop.run_until_complete(inner)
+  File "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/asyncio/base_events.py", line 642, in run_until_complete
+    return future.result()
+  File "/Users/rakibhhridoy/Library/Python/3.9/lib/python/site-packages/nbclient/client.py", line 709, in async_execute
+    await self.async_execute_cell(
+  File "/Users/rakibhhridoy/Library/Python/3.9/lib/python/site-packages/nbclient/client.py", line 1062, in async_execute_cell
+    await self._check_raise_for_error(cell, cell_index, exec_reply)
+  File "/Users/rakibhhridoy/Library/Python/3.9/lib/python/site-packages/nbclient/client.py", line 918, in _check_raise_for_error
+    raise CellExecutionError.from_cell_and_msg(cell, exec_reply_content)
+nbclient.exceptions.CellExecutionError: An error occurred while executing the following cell:
+------------------
+import pandas as pd
+import numpy as np
+import glob
+import os
+import rasterio
+from rasterio.windows import Window
+from scipy.spatial import distance_matrix
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import r2_score, mean_squared_error
+from sklearn.model_selection import KFold
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, Flatten, Dense, Concatenate, Dropout, MultiHeadAttention, LayerNormalization, Reshape
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.utils import Sequence
+import tensorflow as tf
+import gc # Import garbage collector
+import pickle # Import the pickle library for saving objects
+import matplotlib.pyplot as plt # Import matplotlib for plotting
+# Define the single buffer size to use
+BUFFER_METERS = 500
+# ==================== 1. Load Data ==================== #
+orig = pd.read_csv("../../data/RainySeason.csv")
+river_100 = pd.read_csv("../data/Samples_100.csv")
+combined_data = pd.concat([river_100, orig], ignore_index=True)
+drop_cols = ['Stations','River','Lat','Long','geometry']
+numeric_cols = orig.drop(columns=drop_cols).columns.drop('RI')
+# ==================== 2. Collect ALL Rasters ==================== #
+raster_paths = []
+raster_paths += glob.glob("../CalIndices/*.tif")
+raster_paths += glob.glob("../LULCMerged/*.tif")
+raster_paths += glob.glob("../IDW/*.tif")
+print(f"Using {len(raster_paths)} raster layers for CNN input.")
+for r in raster_paths:
+    print("  -", os.path.basename(r))
+# ==================== 3. Create a Custom Data Generator ==================== #
+def extract_patch_for_generator(coords, raster_files, buffer_pixels_x, buffer_pixels_y, patch_width, patch_height):
+    """
+    Extracts a batch of patches from rasters for a given set of coordinates.
+    This function is optimized to be called by the data generator for each batch.
+    """
+    patches = []
+    # Loop through each coordinate pair in the batch
+    for lon, lat in coords:
+        channels = []
+        # Loop through each raster file to get a single patch for each raster
+        for rfile in raster_files:
+            with rasterio.open(rfile) as src:
+                try:
+                    row, col = src.index(lon, lat)
+                    win = Window(col - buffer_pixels_x, row - buffer_pixels_y, patch_width, patch_height)
+                    arr = src.read(1, window=win, boundless=True, fill_value=0)
+                    arr = arr.astype(np.float32)
+                    if np.nanmax(arr) != 0:
+                        arr /= np.nanmax(arr)
+                except Exception as e:
+                    print(f"Error processing {rfile} for coordinates ({lon}, {lat}): {e}")
+                    arr = np.zeros((patch_width, patch_height), dtype=np.float32)
+            channels.append(arr)
+        patches.append(np.stack(channels, axis=-1))
+    
+    return np.array(patches)
+class DataGenerator(Sequence):
+    def __init__(self, coords, mlp_data, gnn_data, y, raster_paths, buffer_meters, batch_size=4, shuffle=True, **kwargs):
+        super().__init__(**kwargs)
+        self.coords = coords
+        self.mlp_data = mlp_data
+        self.gnn_data = gnn_data
+        self.y = y
+        self.raster_paths = raster_paths
+        self.buffer_meters = buffer_meters
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.indices = np.arange(len(self.y))
+        # Pre-calculate patch size from the first raster
+        with rasterio.open(raster_paths[0]) as src:
+            res_x, res_y = src.res
+            self.buffer_pixels_x = int(self.buffer_meters / res_x)
+            self.buffer_pixels_y = int(self.buffer_meters / res_y)
+            self.patch_width = 2 * self.buffer_pixels_x
+            self.patch_height = 2 * self.buffer_pixels_y
+        self.on_epoch_end()
+    def __len__(self):
+        return int(np.floor(len(self.y) / self.batch_size))
+    def on_epoch_end(self):
+        if self.shuffle:
+            np.random.shuffle(self.indices)
+            
+    def __getitem__(self, index):
+        # Get batch indices
+        batch_indices = self.indices[index * self.batch_size:(index + 1) * self.batch_size]
+        # Get batch data
+        batch_coords = self.coords[batch_indices]
+        batch_mlp = self.mlp_data[batch_indices]
+        batch_gnn = self.gnn_data[batch_indices, :]
+        batch_y = self.y[batch_indices]
+        # Extract CNN patches for the current batch
+        batch_cnn = extract_patch_for_generator(
+            batch_coords,
+            self.raster_paths,
+            self.buffer_pixels_x,
+            self.buffer_pixels_y,
+            self.patch_width,
+            self.patch_height
+        )
+        
+        return (batch_cnn, batch_mlp, batch_gnn), batch_y
+def evaluate_model(model, coords, mlp_data, gnn_data, y_true, raster_paths, buffer_meters, batch_size=4, return_preds=False):
+    """
+    Evaluates the model on given data and returns R², RMSE, and predictions.
+    """
+    num_samples = len(y_true)
+    y_pred_list = []
+    
+    with rasterio.open(raster_paths[0]) as src:
+        res_x, res_y = src.res
+        buffer_pixels_x = int(buffer_meters / res_x)
+        buffer_pixels_y = int(buffer_meters / res_y)
+        patch_width = 2 * buffer_pixels_x
+        patch_height = 2 * buffer_pixels_y
+    for i in range(0, num_samples, batch_size):
+        batch_coords = coords[i:i+batch_size]
+        batch_mlp = mlp_data[i:i+batch_size]
+        batch_gnn = gnn_data[i:i+batch_size, :]
+        
+        batch_cnn = extract_patch_for_generator(
+            batch_coords, raster_paths, buffer_pixels_x, buffer_pixels_y, patch_width, patch_height
+        )
+        
+        y_pred_list.append(model.predict((batch_cnn, batch_mlp, batch_gnn)).flatten())
+        
+    y_pred = np.concatenate(y_pred_list)
+    
+    if return_preds:
+        return y_pred
+    else:
+        r2 = r2_score(y_true, y_pred)
+        rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+        return r2, rmse
+def calculate_permutation_importance(model, coords, mlp_data, gnn_data, y_true, raster_paths, numeric_cols, buffer_meters, batch_size=4):
+    """
+    Calculates permutation feature importance for the three model branches
+    and for each individual numeric feature.
+    """
+    print("\nStarting Permutation Feature Importance Analysis...")
+    
+    # Get baseline R² on the unshuffled data
+    baseline_r2, _ = evaluate_model(model, coords, mlp_data, gnn_data, y_true, raster_paths, buffer_meters, batch_size=batch_size)
+    print(f"Baseline R² on test set: {baseline_r2:.4f}\n")
+    importance = {}
+    
+    # Permute CNN input (all rasters at once)
+    print("Permuting CNN features...")
+    shuffled_indices_cnn = np.random.permutation(len(y_true))
+    coords_shuffled = coords[shuffled_indices_cnn]
+    shuffled_r2, _ = evaluate_model(model, coords_shuffled, mlp_data, gnn_data, y_true, raster_paths, buffer_meters, batch_size=batch_size)
+    importance['CNN_all_rasters'] = baseline_r2 - shuffled_r2
+    
+    # Permute GNN input
+    print("Permuting GNN features...")
+    shuffled_gnn_data = gnn_data.copy()
+    np.random.shuffle(shuffled_gnn_data)
+    shuffled_r2, _ = evaluate_model(model, coords, mlp_data, shuffled_gnn_data, y_true, raster_paths, buffer_meters, batch_size=batch_size)
+    importance['GNN_distance_matrix'] = baseline_r2 - shuffled_r2
+    
+    # Permute each MLP input feature individually
+    print("Permuting individual numeric features...")
+    for i, col in enumerate(numeric_cols):
+        # Create a copy to shuffle a single column
+        shuffled_mlp_data = mlp_data.copy()
+        
+        # Get the index of the column to shuffle in the numpy array
+        mlp_data_df = pd.DataFrame(mlp_data, columns=numeric_cols)
+        col_index = mlp_data_df.columns.get_loc(col)
+        
+        # Shuffle only the values for this specific column
+        shuffled_col = shuffled_mlp_data[:, col_index].copy()
+        np.random.shuffle(shuffled_col)
+        shuffled_mlp_data[:, col_index] = shuffled_col
+        
+        # Evaluate model with the single shuffled feature
+        shuffled_r2, _ = evaluate_model(model, coords, shuffled_mlp_data, gnn_data, y_true, raster_paths, buffer_meters, batch_size=batch_size)
+        importance[f'MLP_{col}'] = baseline_r2 - shuffled_r2
+    return importance
+# --- NEW FUNCTION: Plotting the training history ---
+def plot_training_history(history, fold_num=None):
+    """
+    Plots the training and validation loss over the epochs.
+    """
+    loss = history.history['loss']
+    val_loss = history.history['val_loss']
+    epochs = range(1, len(loss) + 1)
+    
+    plt.figure(figsize=(10, 6))
+    plt.plot(epochs, loss, 'bo', label='Training Loss')
+    plt.plot(epochs, val_loss, 'b', label='Validation Loss')
+    if fold_num is not None:
+        plt.title(f'Training and Validation Loss for Fold {fold_num}')
+    else:
+        plt.title('Training and Validation Loss')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss (MSE)')
+    plt.legend()
+    plt.show()
+    print("Training history plot generated.")
+# ==================== 4. Prepare all data for Train/Test Single Split ==================== #
+print("Preparing all data for Train/Test cross-validation...")
+# Prepare GNN & MLP input for the entire dataset
+coords_all = combined_data[['Long', 'Lat']].values
+dist_mat_all = distance_matrix(coords_all, coords_all)
+gnn_all = np.exp(-dist_mat_all/10)
+scaler = StandardScaler()
+mlp_all = scaler.fit_transform(combined_data[numeric_cols])
+y_all = combined_data['RI'].values
+# ==================== 5. Define Transformer-based Fusion Model ==================== #
+def build_transformer_fusion_model(patch_shape, gnn_dim, mlp_dim):
+    # Inputs for all branches
+    cnn_input = Input(shape=patch_shape, name="cnn_input")
+    mlp_input = Input(shape=(mlp_dim,), name="mlp_input")
+    gnn_input = Input(shape=(gnn_dim,), name="gnn_input")
+    
+    # --- CNN Branch ---
+    cnn_branch = Conv2D(32, (3,3), activation="relu", padding="same")(cnn_input)
+    cnn_branch = MaxPooling2D((2,2))(cnn_branch)
+    cnn_branch = Conv2D(64, (3,3), activation="relu", padding="same")(cnn_branch)
+    cnn_branch = MaxPooling2D((2,2))(cnn_branch)
+    cnn_embedding = Flatten(name="cnn_embedding_flatten")(cnn_branch)
+    
+    # --- MLP Branch ---
+    mlp_embedding = Dense(128, activation="relu")(mlp_input)
+    mlp_embedding = Dense(64, activation="relu", name="mlp_embedding")(mlp_embedding)
+    # --- GNN Branch ---
+    gnn_embedding = Dense(128, activation="relu")(gnn_input)
+    gnn_embedding = Dense(64, activation="relu", name="gnn_embedding")(gnn_embedding)
+    # --- Transformer Fusion ---
+    # To feed into the transformer, we need to make all embeddings have the same dimension.
+    # Let's use a dense layer to project them to a common size.
+    projection_dim = 64
+    cnn_proj = Dense(projection_dim)(cnn_embedding)
+    mlp_proj = Dense(projection_dim)(mlp_embedding)
+    gnn_proj = Dense(projection_dim)(gnn_embedding)
+    # Stack the embeddings to create a sequence for the transformer
+    # Shape becomes (None, 3, projection_dim)
+    cnn_expanded = Reshape((1, projection_dim))(cnn_proj)
+    mlp_expanded = Reshape((1, projection_dim))(mlp_proj)
+    gnn_expanded = Reshape((1, projection_dim))(gnn_proj)
+    embeddings = Concatenate(axis=1)([cnn_expanded, mlp_expanded, gnn_expanded])
+    # Transformer Encoder block
+    transformer_output = MultiHeadAttention(
+        num_heads=4,
+        key_dim=projection_dim
+    )(embeddings, embeddings)
+    transformer_output = Dropout(0.2)(transformer_output)
+    transformer_output = LayerNormalization(epsilon=1e-6)(embeddings + transformer_output)
+    
+    # The output from the transformer is a sequence of 3 vectors.
+    transformer_output_flattened = Flatten()(transformer_output)
+    
+    # Final dense layers for prediction
+    f = Dense(128, activation="relu")(transformer_output_flattened)
+    f = Dropout(0.4)(f)
+    f = Dense(64, activation="relu")(f)
+    output = Dense(1, activation="linear", name="final_output")(f)
+    # Build and compile the model
+    model = Model(inputs=[cnn_input, mlp_input, gnn_input], outputs=output)
+    model.compile(optimizer=Adam(learning_rate=0.0005), loss="mse")
+    return model
+# ==================== 6. Implement Train/Test Single Split ==================== #
+print("\n" + "="*80)
+print("Starting Train/Test Single Split (K=5)")
+print("="*80)
+# Initialize Train/Test
+n_splits = 5
+k_folds = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+fold_r2_scores = []
+fold_rmse_scores = []
+batch_size = 4
+# Calculate CNN patch shape once
+with rasterio.open(raster_paths[0]) as src:
+    res_x, res_y = src.res
+    buffer_pixels_x = int(BUFFER_METERS / res_x)
+    patch_width = 2 * buffer_pixels_x
+    cnn_patch_shape = (patch_width, patch_width, len(raster_paths))
+mlp_input_dim = mlp_all.shape[1]
+# Loop through each fold
+for fold, (train_index, val_index) in enumerate(k_folds.split(combined_data)):
+    print(f"\n--- Fold {fold+1}/{n_splits} ---")
+    # Split the data for the current fold
+    coords_train_fold, coords_val_fold = coords_all[train_index], coords_all[val_index]
+    mlp_train_fold, mlp_val_fold = mlp_all[train_index], mlp_all[val_index]
+    y_train_fold, y_val_fold = y_all[train_index], y_all[val_index]
+    # Handle the GNN data split
+    # gnn_train_fold is the sub-matrix for the training points
+    gnn_train_fold = gnn_all[train_index][:, train_index]
+    # gnn_val_fold is the matrix of validation points' distances to training points
+    gnn_val_fold = gnn_all[val_index][:, train_index]
+    # Build a fresh model for each fold
+    model = build_transformer_fusion_model(cnn_patch_shape, len(gnn_train_fold), mlp_input_dim)
+    
+    # Create data generators for the current fold
+    train_generator = DataGenerator(
+        coords=coords_train_fold, mlp_data=mlp_train_fold, gnn_data=gnn_train_fold, y=y_train_fold,
+        raster_paths=raster_paths, buffer_meters=BUFFER_METERS, batch_size=batch_size, shuffle=True
+    )
+    val_generator = DataGenerator(
+        coords=coords_val_fold, mlp_data=mlp_val_fold, gnn_data=gnn_val_fold, y=y_val_fold,
+        raster_paths=raster_paths, buffer_meters=BUFFER_METERS, batch_size=batch_size, shuffle=False
+    )
+    # Train the model with early stopping
+    early_stopping = EarlyStopping(
+        monitor='val_loss',
+        patience=10,
+        restore_best_weights=True
+    )
+    history = model.fit(
+        train_generator,
+        epochs=100,
+        verbose=1,
+        callbacks=[early_stopping],
+        validation_data=val_generator
+    )
+    # Evaluate the model on the validation set for this fold
+    r2_fold, rmse_fold = evaluate_model(
+        model, coords_val_fold, mlp_val_fold, gnn_val_fold, y_val_fold,
+        raster_paths, BUFFER_METERS, batch_size=batch_size
+    )
+    # Store the results
+    fold_r2_scores.append(r2_fold)
+    fold_rmse_scores.append(rmse_fold)
+    
+    print(f"Fold {fold+1} R²: {r2_fold:.4f} | RMSE: {rmse_fold:.4f}")
+    models_dir = 'models/transformer'
+    tf_save_path = os.path.join(models_dir, f'transformer_cnn_gnn_mlp{fold+1}.keras')
+    model.save(tf_save_path)
+    # Clean up memory
+    del model, history, train_generator, val_generator
+    gc.collect()
+# ==================== 7. Summarize Single Split Results ==================== #
+print("\n" + "="*80)
+print(f"Overall Single Split Results ({n_splits} Folds)")
+print("="*80)
+print(f"Average R²: {np.mean(fold_r2_scores):.4f} +/- {np.std(fold_r2_scores):.4f}")
+print(f"Average RMSE: {np.mean(fold_rmse_scores):.4f} +/- {np.std(fold_rmse_scores):.4f}")
+
+------------------
+
+----- stdout -----
+Using 26 raster layers for CNN input.
+  - bui.tif
+  - ndsi.tif
+  - savi.tif
+  - ndbsi.tif
+  - ui.tif
+  - ndwi.tif
+  - ndbi.tif
+  - awei.tif
+  - evi.tif
+  - mndwi.tif
+  - ndvi.tif
+  - LULC2020.tif
+  - LULC2021.tif
+  - LULC2022.tif
+  - LULC2019.tif
+  - LULC2018.tif
+  - LULC2017.tif
+  - Pb_R.tif
+  - ClayR.tif
+  - SandR.tif
+  - CdR.tif
+  - CrR.tif
+  - AsR.tif
+  - SiltR.tif
+  - CuR.tif
+  - NiR.tif
+Preparing all data for Train/Test cross-validation...
+
+================================================================================
+Starting Train/Test Single Split (K=5)
+================================================================================
+
+--- Fold 1/5 ---
+----- stdout -----
+Epoch 1/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m1:10[0m 3s/step - loss: 27931.3398
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 122ms/step - loss: 27289.6328
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 119ms/step - loss: 29998.4961
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 118ms/step - loss: 31300.9785
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 117ms/step - loss: 31447.3516
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 32523.9941
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 33382.4961
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 33726.9062
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 33700.5508
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 116ms/step - loss: 33484.8125
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 116ms/step - loss: 33207.5078
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 33007.6875
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 33023.5312
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 32931.5898
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 115ms/step - loss: 32937.1211
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 115ms/step - loss: 32991.3867
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 115ms/step - loss: 33053.0703
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 115ms/step - loss: 33200.6445
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 115ms/step - loss: 33286.1094
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 115ms/step - loss: 33367.8047
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 115ms/step - loss: 33482.3789
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 115ms/step - loss: 33564.2617
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 115ms/step - loss: 33602.8906
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m7s[0m 162ms/step - loss: 33638.3008 - val_loss: 22520.6504
+----- stdout -----
+Epoch 2/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 158ms/step - loss: 60233.1406
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 121ms/step - loss: 49331.8047
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 118ms/step - loss: 47970.1992
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 117ms/step - loss: 45467.0820
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 117ms/step - loss: 43095.0898
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 41721.4102
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 40416.4453
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 39532.0469
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 38845.4297
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 118ms/step - loss: 38150.7188
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 118ms/step - loss: 37637.7734
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 119ms/step - loss: 37283.4062
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 119ms/step - loss: 36996.6875
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 119ms/step - loss: 36634.6367
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 119ms/step - loss: 36293.0664
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 119ms/step - loss: 35975.1992
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 119ms/step - loss: 35883.4141
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 119ms/step - loss: 35728.3516
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 119ms/step - loss: 35535.4258
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 118ms/step - loss: 35344.6094
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 118ms/step - loss: 35127.9570
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 118ms/step - loss: 34879.0195
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 118ms/step - loss: 34608.4766
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m3s[0m 148ms/step - loss: 34360.4805 - val_loss: 15146.1729
+----- stdout -----
+Epoch 3/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 152ms/step - loss: 7439.5566
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 120ms/step - loss: 21148.8438
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 115ms/step - loss: 25211.3164
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 113ms/step - loss: 25555.3418
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 115ms/step - loss: 26229.1660
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 26935.8672
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 27767.2598
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 116ms/step - loss: 28073.0332
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 27992.8477
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 27950.5117
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 27816.1523
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 27691.8555
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 27475.5312
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 27299.7168
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 115ms/step - loss: 27138.1777
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 115ms/step - loss: 26945.9062
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 115ms/step - loss: 26736.7754
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 115ms/step - loss: 26506.5430
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 115ms/step - loss: 26246.8730
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 115ms/step - loss: 25964.1738
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 115ms/step - loss: 25675.1934
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 115ms/step - loss: 25400.8750
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 115ms/step - loss: 25123.9375
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m3s[0m 146ms/step - loss: 24870.0781 - val_loss: 5533.6499
+----- stdout -----
+Epoch 4/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 150ms/step - loss: 12245.0879
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 118ms/step - loss: 17426.2422
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 120ms/step - loss: 17385.7461
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 119ms/step - loss: 16763.5762
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 118ms/step - loss: 15795.6455
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 14830.7871
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 116ms/step - loss: 13958.4727
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 118ms/step - loss: 13217.4004
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 118ms/step - loss: 12567.4502
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 12165.0322
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 11834.4707
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 11521.7441
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 11254.5518
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 11078.0059
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 117ms/step - loss: 10898.1602
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 117ms/step - loss: 10759.8818
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 116ms/step - loss: 10666.2598
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 116ms/step - loss: 10580.2324
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 116ms/step - loss: 10512.0723
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 116ms/step - loss: 10442.3691
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 116ms/step - loss: 10360.5361
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 116ms/step - loss: 10275.2812
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 116ms/step - loss: 10184.8711
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m3s[0m 146ms/step - loss: 10101.9961 - val_loss: 2362.8933
+----- stdout -----
+Epoch 5/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 151ms/step - loss: 8972.6992
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 120ms/step - loss: 8039.9912
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 115ms/step - loss: 8994.3965
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 113ms/step - loss: 8865.3281
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 114ms/step - loss: 8559.1221
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m1s[0m 114ms/step - loss: 8286.1602
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 8131.4404
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 7969.9297
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 7788.8652
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 7598.8882
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 116ms/step - loss: 7410.3086
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 7257.7002
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 7152.8022
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 7087.7031
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 117ms/step - loss: 7005.2461
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 117ms/step - loss: 6944.9390
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 117ms/step - loss: 6880.7939
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 117ms/step - loss: 6827.4644
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 117ms/step - loss: 6781.3271
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 116ms/step - loss: 6731.1338
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 116ms/step - loss: 6682.4453
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 116ms/step - loss: 6628.2314
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 116ms/step - loss: 6583.8301
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m3s[0m 146ms/step - loss: 6543.1284 - val_loss: 1783.5444
+----- stdout -----
+Epoch 6/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 149ms/step - loss: 17751.2793
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 116ms/step - loss: 13466.7148
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 119ms/step - loss: 11570.8936
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 117ms/step - loss: 10337.7324
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 117ms/step - loss: 9376.8994
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m1s[0m 116ms/step - loss: 8737.7246
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 8190.7476
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 7773.2061
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 7390.7148
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 7066.6172
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 6774.0376
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 6513.9316
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 6279.9937
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 114ms/step - loss: 6096.8154
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 114ms/step - loss: 5930.3115
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 114ms/step - loss: 5818.9272
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 114ms/step - loss: 5726.4868
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 114ms/step - loss: 5639.4570
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 114ms/step - loss: 5555.9902
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 114ms/step - loss: 5471.6885
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 114ms/step - loss: 5387.0054
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 114ms/step - loss: 5303.6802
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 114ms/step - loss: 5226.2876
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m3s[0m 145ms/step - loss: 5155.3447 - val_loss: 295.4965
+----- stdout -----
+Epoch 7/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 154ms/step - loss: 283.6262
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 123ms/step - loss: 735.6564
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 118ms/step - loss: 843.8799
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 117ms/step - loss: 1004.7385
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 116ms/step - loss: 1053.2572
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m1s[0m 116ms/step - loss: 1070.3690
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 1072.9088
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 1062.4232
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 1110.2112
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 1146.9500
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 1165.6212
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 1174.3890
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 114ms/step - loss: 1184.5045
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 114ms/step - loss: 1190.4242
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 115ms/step - loss: 1210.4669
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 115ms/step - loss: 1225.4684
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 115ms/step - loss: 1238.4539
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 114ms/step - loss: 1260.6493
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 114ms/step - loss: 1278.4352
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 114ms/step - loss: 1294.8983
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 114ms/step - loss: 1314.8381
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 114ms/step - loss: 1334.0413
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 114ms/step - loss: 1355.1970
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m3s[0m 144ms/step - loss: 1374.5898 - val_loss: 621.2190
+----- stdout -----
+Epoch 8/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 154ms/step - loss: 880.2786
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 116ms/step - loss: 778.5206
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 120ms/step - loss: 746.5322
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 118ms/step - loss: 691.2429
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 119ms/step - loss: 694.4003
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m2s[0m 118ms/step - loss: 714.0945
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 118ms/step - loss: 714.8412
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 119ms/step - loss: 720.9354
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 120ms/step - loss: 729.3132
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 120ms/step - loss: 733.8051
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 120ms/step - loss: 741.9317
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 120ms/step - loss: 751.6807
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 120ms/step - loss: 760.4534
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 120ms/step - loss: 765.6159
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 120ms/step - loss: 786.6198
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 120ms/step - loss: 806.1145
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 120ms/step - loss: 820.4608
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 120ms/step - loss: 834.8153
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 120ms/step - loss: 854.2639
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 120ms/step - loss: 870.9814
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 119ms/step - loss: 894.2953
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 119ms/step - loss: 913.2826
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 119ms/step - loss: 930.0260
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m3s[0m 149ms/step - loss: 945.3741 - val_loss: 423.0529
+----- stdout -----
+Epoch 9/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 152ms/step - loss: 996.0847
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 119ms/step - loss: 990.5167
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 116ms/step - loss: 1076.6954
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 115ms/step - loss: 1103.8789
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 115ms/step - loss: 1188.6584
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m1s[0m 116ms/step - loss: 1220.0748
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 116ms/step - loss: 1229.6064
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 1229.1144
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 114ms/step - loss: 1215.0605
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 114ms/step - loss: 1212.8890
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 114ms/step - loss: 1205.7808
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 114ms/step - loss: 1198.9294
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 114ms/step - loss: 1190.4673
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 1194.5867
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 115ms/step - loss: 1197.4749
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 115ms/step - loss: 1195.3761
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 115ms/step - loss: 1203.8971
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 115ms/step - loss: 1208.1489
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 115ms/step - loss: 1211.6248
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 115ms/step - loss: 1220.7987
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 115ms/step - loss: 1231.0499
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 115ms/step - loss: 1238.0460
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 115ms/step - loss: 1243.1189
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m3s[0m 146ms/step - loss: 1247.7690 - val_loss: 828.6999
+----- stdout -----
+Epoch 10/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 156ms/step - loss: 508.7989
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 115ms/step - loss: 449.9477
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 121ms/step - loss: 530.6431
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 118ms/step - loss: 637.4977
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 117ms/step - loss: 709.9352
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 751.3434
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 764.8192
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 772.8701
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 775.9067
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 116ms/step - loss: 773.2537
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 116ms/step - loss: 774.8563
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 116ms/step - loss: 773.8091
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 116ms/step - loss: 771.6407
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 116ms/step - loss: 772.6800
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 116ms/step - loss: 780.0975
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 116ms/step - loss: 785.0789
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 116ms/step - loss: 793.9099
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 116ms/step - loss: 806.7529
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 116ms/step - loss: 818.2359
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 116ms/step - loss: 826.9750
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 116ms/step - loss: 833.3422
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 116ms/step - loss: 837.7170
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 116ms/step - loss: 841.9399
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m3s[0m 146ms/step - loss: 845.8109 - val_loss: 523.0162
+----- stdout -----
+Epoch 11/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 151ms/step - loss: 929.6357
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 120ms/step - loss: 701.3275
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 117ms/step - loss: 734.4967
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 116ms/step - loss: 732.8763
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 117ms/step - loss: 718.4250
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 763.8391
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 118ms/step - loss: 776.6058
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 118ms/step - loss: 778.1691
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 118ms/step - loss: 782.4481
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 118ms/step - loss: 781.6724
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 118ms/step - loss: 788.8087
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 118ms/step - loss: 789.6042
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 118ms/step - loss: 800.5467
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 118ms/step - loss: 806.1307
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 118ms/step - loss: 809.8546
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 117ms/step - loss: 810.5394
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 117ms/step - loss: 811.4766
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 117ms/step - loss: 810.5173
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 117ms/step - loss: 808.6623
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 117ms/step - loss: 809.6451
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 117ms/step - loss: 812.2356
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 117ms/step - loss: 813.1754
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 117ms/step - loss: 813.0001
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m3s[0m 148ms/step - loss: 812.8394 - val_loss: 491.0560
+----- stdout -----
+Epoch 12/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 163ms/step - loss: 692.9716
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 144ms/step - loss: 724.0500
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 137ms/step - loss: 697.6779
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 137ms/step - loss: 657.4077
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 134ms/step - loss: 654.6911
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m2s[0m 130ms/step - loss: 637.0536
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m2s[0m 129ms/step - loss: 634.1060
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 129ms/step - loss: 625.7659
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 128ms/step - loss: 625.1421
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 127ms/step - loss: 623.4822
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 126ms/step - loss: 619.8594
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 125ms/step - loss: 614.3630
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 124ms/step - loss: 608.3694
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 123ms/step - loss: 601.0084
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 122ms/step - loss: 599.2840
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 122ms/step - loss: 596.7039
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 121ms/step - loss: 593.1876
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 121ms/step - loss: 589.3162
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 121ms/step - loss: 585.7685
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 121ms/step - loss: 582.7015
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 122ms/step - loss: 585.2084
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 122ms/step - loss: 588.1444
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 122ms/step - loss: 592.4699
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m4s[0m 153ms/step - loss: 596.4350 - val_loss: 1329.7452
+----- stdout -----
+Epoch 13/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 153ms/step - loss: 668.1934
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 120ms/step - loss: 1749.4800
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 118ms/step - loss: 2205.5352
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 116ms/step - loss: 2246.0681
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 117ms/step - loss: 2199.3455
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 2121.7566
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 2087.2759
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 2038.6071
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 1985.3289
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 1939.0575
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 1892.5797
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 1846.7371
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 1801.3004
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 1757.9386
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 117ms/step - loss: 1725.8641
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 117ms/step - loss: 1693.0811
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 116ms/step - loss: 1660.9180
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 117ms/step - loss: 1629.3237
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 117ms/step - loss: 1598.2883
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 116ms/step - loss: 1569.8927
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 116ms/step - loss: 1543.1188
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 116ms/step - loss: 1520.7098
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 116ms/step - loss: 1499.2909
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m3s[0m 146ms/step - loss: 1479.6569 - val_loss: 702.1818
+----- stdout -----
+Epoch 14/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 152ms/step - loss: 307.5206
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 128ms/step - loss: 549.7292
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 123ms/step - loss: 593.4052
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 121ms/step - loss: 717.2650
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 120ms/step - loss: 803.4256
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m2s[0m 120ms/step - loss: 845.1140
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 120ms/step - loss: 866.2350
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 119ms/step - loss: 888.6870
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 119ms/step - loss: 895.3534
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 119ms/step - loss: 897.3652
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 118ms/step - loss: 905.2355
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 118ms/step - loss: 909.3148
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 118ms/step - loss: 909.3850
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 905.5652
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 117ms/step - loss: 899.0491
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 117ms/step - loss: 891.3653
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 117ms/step - loss: 882.0285
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 117ms/step - loss: 881.3260
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 116ms/step - loss: 883.4059
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 116ms/step - loss: 885.5789
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 116ms/step - loss: 886.4422
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 116ms/step - loss: 889.3011
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 116ms/step - loss: 895.4371
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m3s[0m 148ms/step - loss: 901.0617 - val_loss: 247.7506
+----- stdout -----
+Epoch 15/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 153ms/step - loss: 28.1082
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 125ms/step - loss: 129.6125
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 118ms/step - loss: 156.0503
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 117ms/step - loss: 178.9025
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 116ms/step - loss: 278.0482
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m2s[0m 122ms/step - loss: 335.5175
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 125ms/step - loss: 369.6874
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 127ms/step - loss: 391.6685
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 128ms/step - loss: 404.4177
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 130ms/step - loss: 412.6891
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 130ms/step - loss: 421.1116
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 130ms/step - loss: 426.7201
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 131ms/step - loss: 441.5451
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 131ms/step - loss: 455.5283
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m1s[0m 131ms/step - loss: 466.5115
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 132ms/step - loss: 481.6212
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 134ms/step - loss: 498.6788
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 134ms/step - loss: 511.9002
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 134ms/step - loss: 524.8248
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 134ms/step - loss: 535.5544
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 135ms/step - loss: 545.1099
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 135ms/step - loss: 553.5429
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 134ms/step - loss: 560.7379
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m4s[0m 170ms/step - loss: 567.3332 - val_loss: 249.3542
+----- stdout -----
+Epoch 16/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 174ms/step - loss: 786.6502
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 140ms/step - loss: 634.5995
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 137ms/step - loss: 726.0718
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 129ms/step - loss: 744.1631
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 126ms/step - loss: 741.1991
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m2s[0m 124ms/step - loss: 735.4623
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 123ms/step - loss: 719.5140
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 122ms/step - loss: 698.7885
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 121ms/step - loss: 676.9929
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 120ms/step - loss: 657.6102
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 120ms/step - loss: 644.4296
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 120ms/step - loss: 634.3920
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 120ms/step - loss: 623.8234
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 120ms/step - loss: 615.6765
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 119ms/step - loss: 611.1902
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 119ms/step - loss: 607.1005
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 119ms/step - loss: 602.2189
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 119ms/step - loss: 599.2761
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 119ms/step - loss: 600.3511
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 119ms/step - loss: 600.8090
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 119ms/step - loss: 600.5457
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 119ms/step - loss: 599.6320
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 118ms/step - loss: 599.0297
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m3s[0m 150ms/step - loss: 598.4777 - val_loss: 330.3737
+----- stdout -----
+Epoch 17/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 154ms/step - loss: 311.6783
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 129ms/step - loss: 274.3852
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 125ms/step - loss: 297.8633
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 128ms/step - loss: 317.2293
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 131ms/step - loss: 342.5472
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m2s[0m 134ms/step - loss: 355.6787
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m2s[0m 134ms/step - loss: 373.7842
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m2s[0m 135ms/step - loss: 413.9657
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 135ms/step - loss: 443.1947
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 134ms/step - loss: 484.1905
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 134ms/step - loss: 514.5107
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 134ms/step - loss: 541.3573
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 134ms/step - loss: 561.7997
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 133ms/step - loss: 577.9338
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m1s[0m 135ms/step - loss: 588.8893
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 133ms/step - loss: 599.6026
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 133ms/step - loss: 608.6172
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 133ms/step - loss: 615.3448
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 132ms/step - loss: 619.6362
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 132ms/step - loss: 622.3603
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 132ms/step - loss: 623.5671
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 132ms/step - loss: 624.0806
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 132ms/step - loss: 624.8499
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m4s[0m 168ms/step - loss: 625.5550 - val_loss: 205.6713
+----- stdout -----
+Epoch 18/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 172ms/step - loss: 215.9099
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 142ms/step - loss: 246.1213
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 126ms/step - loss: 233.4243
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 122ms/step - loss: 302.3355
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 122ms/step - loss: 330.4862
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m2s[0m 121ms/step - loss: 369.4689
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 122ms/step - loss: 412.4536
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 122ms/step - loss: 436.2523
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 122ms/step - loss: 450.5142
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 122ms/step - loss: 461.0765
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 121ms/step - loss: 473.9181
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 121ms/step - loss: 481.3353
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 121ms/step - loss: 488.1829
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 120ms/step - loss: 491.5746
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 120ms/step - loss: 494.7997
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 120ms/step - loss: 496.6218
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 120ms/step - loss: 496.9642
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 120ms/step - loss: 496.3167
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 120ms/step - loss: 499.2161
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 119ms/step - loss: 500.7194
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 119ms/step - loss: 501.4419
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 119ms/step - loss: 501.6513
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 119ms/step - loss: 501.9686
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m3s[0m 150ms/step - loss: 502.2594 - val_loss: 219.6924
+----- stdout -----
+Epoch 19/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 167ms/step - loss: 306.9560
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 136ms/step - loss: 311.0983
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 136ms/step - loss: 306.8522
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 133ms/step - loss: 290.2340
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 133ms/step - loss: 278.7365
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m2s[0m 134ms/step - loss: 275.7957
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m2s[0m 134ms/step - loss: 272.0892
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m2s[0m 134ms/step - loss: 267.7392
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 134ms/step - loss: 265.1550
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 133ms/step - loss: 265.9002
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 132ms/step - loss: 268.1400
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 132ms/step - loss: 279.6632
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 133ms/step - loss: 287.4563
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 132ms/step - loss: 293.1446
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m1s[0m 132ms/step - loss: 301.4749
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 132ms/step - loss: 308.1766
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 133ms/step - loss: 312.9125
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 133ms/step - loss: 320.5177
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 133ms/step - loss: 327.1042
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 133ms/step - loss: 334.5462
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 134ms/step - loss: 340.5001
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 134ms/step - loss: 346.5965
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 134ms/step - loss: 351.9626
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m4s[0m 166ms/step - loss: 356.8816 - val_loss: 263.5814
+----- stdout -----
+Epoch 20/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 156ms/step - loss: 1690.0499
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 127ms/step - loss: 1409.8733
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 123ms/step - loss: 1286.3324
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 122ms/step - loss: 1214.7917
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 120ms/step - loss: 1168.1804
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m2s[0m 119ms/step - loss: 1128.9646
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 120ms/step - loss: 1128.7771
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 120ms/step - loss: 1115.8580
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 120ms/step - loss: 1095.8225
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 119ms/step - loss: 1078.6185
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 118ms/step - loss: 1079.2429
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 118ms/step - loss: 1072.8158
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 118ms/step - loss: 1062.2676
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 118ms/step - loss: 1049.4941
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 118ms/step - loss: 1040.7289
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 118ms/step - loss: 1033.6700
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 118ms/step - loss: 1025.9010
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 118ms/step - loss: 1018.6953
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 118ms/step - loss: 1010.3906
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 118ms/step - loss: 1001.9069
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 118ms/step - loss: 995.0175
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 118ms/step - loss: 987.8789
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 118ms/step - loss: 981.8057
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m4s[0m 154ms/step - loss: 976.2385 - val_loss: 418.9787
+----- stdout -----
+Epoch 21/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 176ms/step - loss: 1325.7103
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 144ms/step - loss: 1151.3146
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 142ms/step - loss: 1027.9117
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 138ms/step - loss: 970.4122
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 138ms/step - loss: 911.7973
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m2s[0m 136ms/step - loss: 856.4078
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m2s[0m 136ms/step - loss: 811.2500
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m2s[0m 136ms/step - loss: 806.7273
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 135ms/step - loss: 795.9759
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 135ms/step - loss: 782.2977
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 134ms/step - loss: 768.6311
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 134ms/step - loss: 757.5071
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 134ms/step - loss: 746.1663
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 134ms/step - loss: 734.2128
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m1s[0m 134ms/step - loss: 724.9628
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 134ms/step - loss: 717.8100
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 134ms/step - loss: 712.9444
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 134ms/step - loss: 707.3763
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 134ms/step - loss: 703.3417
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 134ms/step - loss: 699.8964
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 133ms/step - loss: 701.5067
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 132ms/step - loss: 702.9668
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 132ms/step - loss: 703.1536
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m4s[0m 162ms/step - loss: 703.3247 - val_loss: 346.1275
+----- stdout -----
+Epoch 22/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 162ms/step - loss: 318.5582
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 119ms/step - loss: 275.8961
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 114ms/step - loss: 290.9778
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 118ms/step - loss: 303.8311
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 117ms/step - loss: 324.8560
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m2s[0m 118ms/step - loss: 332.0091
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 340.1555
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 118ms/step - loss: 342.4422
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 116ms/step - loss: 341.1027
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 118ms/step - loss: 340.8781
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 119ms/step - loss: 338.4924
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 119ms/step - loss: 335.9935
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 119ms/step - loss: 335.0020
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 120ms/step - loss: 339.4698
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 119ms/step - loss: 346.8000
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 119ms/step - loss: 352.4675
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 119ms/step - loss: 356.9282
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 119ms/step - loss: 360.3443
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 119ms/step - loss: 365.4779
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 120ms/step - loss: 369.1878
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 120ms/step - loss: 372.5271
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 121ms/step - loss: 375.9219
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 121ms/step - loss: 378.4285
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m4s[0m 157ms/step - loss: 380.7262 - val_loss: 218.4395
+----- stdout -----
+Epoch 23/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m4s[0m 191ms/step - loss: 249.2380
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 140ms/step - loss: 415.3420
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 136ms/step - loss: 448.8749
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 135ms/step - loss: 438.1840
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 137ms/step - loss: 433.2621
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m2s[0m 136ms/step - loss: 427.1945
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m2s[0m 136ms/step - loss: 419.9334
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m2s[0m 136ms/step - loss: 410.9197
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 135ms/step - loss: 402.6000
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 134ms/step - loss: 394.9899
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 132ms/step - loss: 395.5443
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 137ms/step - loss: 393.9439
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 136ms/step - loss: 392.0400
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 136ms/step - loss: 392.7518
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m1s[0m 136ms/step - loss: 393.9873
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 135ms/step - loss: 394.5056
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 133ms/step - loss: 394.5472
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 132ms/step - loss: 393.7124
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 132ms/step - loss: 392.7936
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 131ms/step - loss: 394.4666
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 130ms/step - loss: 395.6409
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 130ms/step - loss: 397.8063
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 129ms/step - loss: 399.6291
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m4s[0m 160ms/step - loss: 401.3000 - val_loss: 253.2855
+----- stdout -----
+Epoch 24/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 151ms/step - loss: 661.5179
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 124ms/step - loss: 640.1945
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 120ms/step - loss: 597.2857
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 118ms/step - loss: 549.4150
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 117ms/step - loss: 517.2164
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 489.7967
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 467.3965
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 447.9169
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 446.9627
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 116ms/step - loss: 454.4898
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 116ms/step - loss: 456.8911
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 458.0721
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 458.1121
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 460.0403
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 118ms/step - loss: 460.3503
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 119ms/step - loss: 459.5011
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 120ms/step - loss: 457.6248
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 121ms/step - loss: 458.8289
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 122ms/step - loss: 461.4200
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 123ms/step - loss: 464.4950
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 124ms/step - loss: 466.3908
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 124ms/step - loss: 467.6436
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 124ms/step - loss: 468.9719
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m4s[0m 159ms/step - loss: 470.1895 - val_loss: 181.7319
+----- stdout -----
+Epoch 25/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 175ms/step - loss: 120.0083
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 160ms/step - loss: 101.8925
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 152ms/step - loss: 116.4156
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 147ms/step - loss: 134.6779
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 148ms/step - loss: 162.8409
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m2s[0m 144ms/step - loss: 189.6915
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m2s[0m 142ms/step - loss: 205.5039
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m2s[0m 139ms/step - loss: 224.6517
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 137ms/step - loss: 244.2266
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 139ms/step - loss: 267.8409
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 138ms/step - loss: 285.5613
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 137ms/step - loss: 299.7827
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 136ms/step - loss: 312.0459
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 134ms/step - loss: 327.6036
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m1s[0m 133ms/step - loss: 339.3574
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 132ms/step - loss: 349.8237
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 131ms/step - loss: 358.7825
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 130ms/step - loss: 367.5042
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 130ms/step - loss: 378.8666
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 129ms/step - loss: 387.8827
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 128ms/step - loss: 395.5442
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 127ms/step - loss: 401.5333
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 127ms/step - loss: 406.5824
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m4s[0m 158ms/step - loss: 411.2107 - val_loss: 457.5765
+----- stdout -----
+Epoch 26/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 156ms/step - loss: 416.6530
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 124ms/step - loss: 454.7867
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 119ms/step - loss: 497.5530
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 118ms/step - loss: 521.9133
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 119ms/step - loss: 521.1553
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m2s[0m 121ms/step - loss: 530.4509
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 121ms/step - loss: 553.2397
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 120ms/step - loss: 573.6772
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 119ms/step - loss: 593.8741
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 122ms/step - loss: 608.9969
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 123ms/step - loss: 621.6634
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 124ms/step - loss: 633.2631
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 125ms/step - loss: 638.9802
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 127ms/step - loss: 644.1390
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m1s[0m 128ms/step - loss: 647.6822
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 128ms/step - loss: 651.2549
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 129ms/step - loss: 652.3034
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 129ms/step - loss: 651.3686
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 129ms/step - loss: 649.4131
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 129ms/step - loss: 646.2142
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 130ms/step - loss: 643.3834
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 130ms/step - loss: 640.2994
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 130ms/step - loss: 636.6850
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m4s[0m 166ms/step - loss: 633.3718 - val_loss: 340.6743
+----- stdout -----
+Epoch 27/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 172ms/step - loss: 488.4598
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 141ms/step - loss: 466.0289
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 136ms/step - loss: 525.9469
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 135ms/step - loss: 572.9714
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 134ms/step - loss: 624.1365
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m2s[0m 133ms/step - loss: 650.8347
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m2s[0m 131ms/step - loss: 661.5823
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 129ms/step - loss: 667.7043
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 128ms/step - loss: 679.0330
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 127ms/step - loss: 681.3333
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 126ms/step - loss: 678.4764
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 125ms/step - loss: 672.9654
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 124ms/step - loss: 666.0692
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 124ms/step - loss: 658.0691
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 123ms/step - loss: 651.1999
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 123ms/step - loss: 646.6013
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 122ms/step - loss: 641.2538
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 122ms/step - loss: 636.9178
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 122ms/step - loss: 633.9233
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 121ms/step - loss: 632.9284
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 121ms/step - loss: 632.2427
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 121ms/step - loss: 631.1874
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 120ms/step - loss: 630.5447
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m4s[0m 152ms/step - loss: 629.9557 - val_loss: 304.2967
+----- stdout -----
+Epoch 28/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 160ms/step - loss: 291.4964
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 124ms/step - loss: 278.5975
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 122ms/step - loss: 265.0704
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 133ms/step - loss: 331.4963
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 132ms/step - loss: 360.0658
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m2s[0m 134ms/step - loss: 407.4993
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m2s[0m 135ms/step - loss: 442.4692
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m2s[0m 134ms/step - loss: 460.7419
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 133ms/step - loss: 471.3742
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 134ms/step - loss: 475.9837
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 134ms/step - loss: 484.1431
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 134ms/step - loss: 493.2996
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 135ms/step - loss: 502.8330
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 135ms/step - loss: 510.1964
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m1s[0m 136ms/step - loss: 517.9895
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 136ms/step - loss: 523.6028
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 135ms/step - loss: 527.4852
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 136ms/step - loss: 529.3474
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 136ms/step - loss: 530.0049
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 137ms/step - loss: 530.7643
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 137ms/step - loss: 530.8688
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 137ms/step - loss: 530.3664
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 137ms/step - loss: 529.2179
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m4s[0m 172ms/step - loss: 528.1651 - val_loss: 322.8603
+----- stdout -----
+Epoch 29/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 171ms/step - loss: 293.3909
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 127ms/step - loss: 350.1854
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 127ms/step - loss: 345.9804
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 125ms/step - loss: 326.3486
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 123ms/step - loss: 311.8163
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m2s[0m 122ms/step - loss: 309.6101
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 122ms/step - loss: 306.7419
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 122ms/step - loss: 305.7999
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 121ms/step - loss: 306.5172
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 121ms/step - loss: 304.7817
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 121ms/step - loss: 306.1048
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 120ms/step - loss: 306.8539
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 120ms/step - loss: 308.4023
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 120ms/step - loss: 308.8301
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 119ms/step - loss: 308.3595
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 119ms/step - loss: 307.3186
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 119ms/step - loss: 305.8134
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 119ms/step - loss: 305.0192
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 119ms/step - loss: 304.2466
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 119ms/step - loss: 302.8324
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 119ms/step - loss: 302.2370
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 118ms/step - loss: 303.9297
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 118ms/step - loss: 305.1743
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m3s[0m 150ms/step - loss: 306.3151 - val_loss: 480.4625
+----- stdout -----
+Epoch 30/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m4s[0m 204ms/step - loss: 107.6071
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 132ms/step - loss: 122.9321
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 136ms/step - loss: 149.0951
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 139ms/step - loss: 185.4386
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 137ms/step - loss: 236.8963
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m2s[0m 137ms/step - loss: 268.5392
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m2s[0m 137ms/step - loss: 285.5181
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m2s[0m 137ms/step - loss: 303.3602
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 137ms/step - loss: 321.5553
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 137ms/step - loss: 338.3218
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 137ms/step - loss: 349.0587
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 136ms/step - loss: 363.5538
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 136ms/step - loss: 373.4767
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 137ms/step - loss: 380.7286
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m1s[0m 137ms/step - loss: 386.7126
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 137ms/step - loss: 391.6702
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 138ms/step - loss: 397.6258
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 137ms/step - loss: 401.5592
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 137ms/step - loss: 404.0731
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 137ms/step - loss: 406.2501
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 137ms/step - loss: 407.6825
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 137ms/step - loss: 408.1811
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 137ms/step - loss: 408.0480
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m4s[0m 169ms/step - loss: 407.9261 - val_loss: 386.3796
+----- stdout -----
+Epoch 31/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 150ms/step - loss: 350.2207
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 123ms/step - loss: 318.6049
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 120ms/step - loss: 378.4154
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 118ms/step - loss: 389.0025
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 117ms/step - loss: 386.9438
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 387.2532
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 404.1178
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 117ms/step - loss: 417.9745
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 116ms/step - loss: 432.8881
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 116ms/step - loss: 439.8420
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 116ms/step - loss: 442.3305
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 116ms/step - loss: 441.3649
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 439.3674
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 115ms/step - loss: 459.7057
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 115ms/step - loss: 477.0981
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 115ms/step - loss: 489.8793
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 115ms/step - loss: 505.0667
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 115ms/step - loss: 520.1110
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 115ms/step - loss: 532.8478
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 115ms/step - loss: 543.2167
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 115ms/step - loss: 551.7241
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 115ms/step - loss: 558.1740
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 115ms/step - loss: 563.1130
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m4s[0m 153ms/step - loss: 567.6403 - val_loss: 339.9591
+----- stdout -----
+Epoch 32/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 171ms/step - loss: 3.2940
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 141ms/step - loss: 56.4204
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 151ms/step - loss: 72.0101
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 142ms/step - loss: 84.2971
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 147ms/step - loss: 94.5367
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m2s[0m 143ms/step - loss: 102.8039
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m2s[0m 143ms/step - loss: 115.0330
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m2s[0m 142ms/step - loss: 127.9059
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 140ms/step - loss: 149.6341
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 142ms/step - loss: 167.6108
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 141ms/step - loss: 186.8928
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 140ms/step - loss: 202.7537
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 139ms/step - loss: 217.3102
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 139ms/step - loss: 238.3900
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m1s[0m 137ms/step - loss: 254.8389
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 138ms/step - loss: 267.5168
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 137ms/step - loss: 279.0021
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 137ms/step - loss: 288.7835
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 137ms/step - loss: 296.9003
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 136ms/step - loss: 304.1337
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 135ms/step - loss: 311.1671
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 134ms/step - loss: 316.6852
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 133ms/step - loss: 322.6266
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m4s[0m 168ms/step - loss: 328.0728 - val_loss: 255.2346
+----- stdout -----
+Epoch 33/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 156ms/step - loss: 2489.2927
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 112ms/step - loss: 1964.4845
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 121ms/step - loss: 1676.0203
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 123ms/step - loss: 1491.8419
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 134ms/step - loss: 1348.0627
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m2s[0m 135ms/step - loss: 1302.3833
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m2s[0m 132ms/step - loss: 1254.6012
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m1s[0m 130ms/step - loss: 1204.0746
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 128ms/step - loss: 1168.0333
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 127ms/step - loss: 1133.6967
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 126ms/step - loss: 1099.5022
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 126ms/step - loss: 1066.2092
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 124ms/step - loss: 1034.8727
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 124ms/step - loss: 1005.5350
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 124ms/step - loss: 978.0554
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 123ms/step - loss: 954.0363
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 122ms/step - loss: 931.3371
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 122ms/step - loss: 909.8225
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 123ms/step - loss: 889.5074
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 124ms/step - loss: 874.5694
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 125ms/step - loss: 861.2999
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 125ms/step - loss: 848.6473
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 125ms/step - loss: 836.6145
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m4s[0m 160ms/step - loss: 825.5845 - val_loss: 267.2314
+----- stdout -----
+Epoch 34/100
+----- stdout -----
+[1m 1/23[0m [37m━━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 167ms/step - loss: 361.3737
+----- stdout -----
+[1m 2/23[0m [32m━[0m[37m━━━━━━━━━━━━━━━━━━━[0m [1m3s[0m 166ms/step - loss: 635.6776
+----- stdout -----
+[1m 3/23[0m [32m━━[0m[37m━━━━━━━━━━━━━━━━━━[0m [1m2s[0m 148ms/step - loss: 642.8238
+----- stdout -----
+[1m 4/23[0m [32m━━━[0m[37m━━━━━━━━━━━━━━━━━[0m [1m2s[0m 143ms/step - loss: 630.4687
+----- stdout -----
+[1m 5/23[0m [32m━━━━[0m[37m━━━━━━━━━━━━━━━━[0m [1m2s[0m 142ms/step - loss: 608.5177
+----- stdout -----
+[1m 6/23[0m [32m━━━━━[0m[37m━━━━━━━━━━━━━━━[0m [1m2s[0m 140ms/step - loss: 596.7339
+----- stdout -----
+[1m 7/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m2s[0m 138ms/step - loss: 581.7253
+----- stdout -----
+[1m 8/23[0m [32m━━━━━━[0m[37m━━━━━━━━━━━━━━[0m [1m2s[0m 137ms/step - loss: 589.8738
+----- stdout -----
+[1m 9/23[0m [32m━━━━━━━[0m[37m━━━━━━━━━━━━━[0m [1m1s[0m 132ms/step - loss: 590.0317
+----- stdout -----
+[1m10/23[0m [32m━━━━━━━━[0m[37m━━━━━━━━━━━━[0m [1m1s[0m 133ms/step - loss: 585.5490
+----- stdout -----
+[1m11/23[0m [32m━━━━━━━━━[0m[37m━━━━━━━━━━━[0m [1m1s[0m 134ms/step - loss: 579.7819
+----- stdout -----
+[1m12/23[0m [32m━━━━━━━━━━[0m[37m━━━━━━━━━━[0m [1m1s[0m 135ms/step - loss: 572.7573
+----- stdout -----
+[1m13/23[0m [32m━━━━━━━━━━━[0m[37m━━━━━━━━━[0m [1m1s[0m 137ms/step - loss: 566.3975
+----- stdout -----
+[1m14/23[0m [32m━━━━━━━━━━━━[0m[37m━━━━━━━━[0m [1m1s[0m 136ms/step - loss: 560.8046
+----- stdout -----
+[1m15/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m1s[0m 136ms/step - loss: 555.8004
+----- stdout -----
+[1m16/23[0m [32m━━━━━━━━━━━━━[0m[37m━━━━━━━[0m [1m0s[0m 134ms/step - loss: 550.2935
+----- stdout -----
+[1m17/23[0m [32m━━━━━━━━━━━━━━[0m[37m━━━━━━[0m [1m0s[0m 133ms/step - loss: 544.4849
+----- stdout -----
+[1m18/23[0m [32m━━━━━━━━━━━━━━━[0m[37m━━━━━[0m [1m0s[0m 132ms/step - loss: 540.1666
+----- stdout -----
+[1m19/23[0m [32m━━━━━━━━━━━━━━━━[0m[37m━━━━[0m [1m0s[0m 131ms/step - loss: 536.1067
+----- stdout -----
+[1m20/23[0m [32m━━━━━━━━━━━━━━━━━[0m[37m━━━[0m [1m0s[0m 130ms/step - loss: 532.4782
+----- stdout -----
+[1m21/23[0m [32m━━━━━━━━━━━━━━━━━━[0m[37m━━[0m [1m0s[0m 129ms/step - loss: 528.6711
+----- stdout -----
+[1m22/23[0m [32m━━━━━━━━━━━━━━━━━━━[0m[37m━[0m [1m0s[0m 128ms/step - loss: 524.6404
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 127ms/step - loss: 520.6649
+----- stdout -----
+[1m23/23[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m4s[0m 158ms/step - loss: 517.0207 - val_loss: 411.7841
+----- stdout -----
+[1m1/1[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 134ms/step
+----- stdout -----
+[1m1/1[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 142ms/step
+----- stdout -----
+[1m1/1[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 16ms/step
+----- stdout -----
+[1m1/1[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 25ms/step
+----- stdout -----
+[1m1/1[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 17ms/step
+----- stdout -----
+[1m1/1[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 26ms/step
+----- stdout -----
+[1m1/1[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 16ms/step
+----- stdout -----
+[1m1/1[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 25ms/step
+----- stdout -----
+[1m1/1[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 16ms/step
+----- stdout -----
+[1m1/1[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 24ms/step
+----- stdout -----
+[1m1/1[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 17ms/step
+----- stdout -----
+[1m1/1[0m [32m━━━━━━━━━━━━━━━━━━━━[0m[37m[0m [1m0s[0m 26ms/step
+----- stdout -----
+Fold 1 R²: 0.9179 | RMSE: 13.4808
+------------------
+
+[0;31m---------------------------------------------------------------------------[0m
+[0;31mFileNotFoundError[0m                         Traceback (most recent call last)
+Cell [0;32mIn[4], line 334[0m
+[1;32m    332[0m models_dir [38;5;241m=[39m [38;5;124m'[39m[38;5;124mmodels/transformer[39m[38;5;124m'[39m
+[1;32m    333[0m tf_save_path [38;5;241m=[39m os[38;5;241m.[39mpath[38;5;241m.[39mjoin(models_dir, [38;5;124mf[39m[38;5;124m'[39m[38;5;124mtransformer_cnn_gnn_mlp[39m[38;5;132;01m{[39;00mfold[38;5;241m+[39m[38;5;241m1[39m[38;5;132;01m}[39;00m[38;5;124m.keras[39m[38;5;124m'[39m)
+[0;32m--> 334[0m [43mmodel[49m[38;5;241;43m.[39;49m[43msave[49m[43m([49m[43mtf_save_path[49m[43m)[49m
+[1;32m    335[0m [38;5;66;03m# Clean up memory[39;00m
+[1;32m    336[0m [38;5;28;01mdel[39;00m model, history, train_generator, val_generator
+
+File [0;32m~/Library/Python/3.9/lib/python/site-packages/keras/src/utils/traceback_utils.py:122[0m, in [0;36mfilter_traceback.<locals>.error_handler[0;34m(*args, **kwargs)[0m
+[1;32m    119[0m     filtered_tb [38;5;241m=[39m _process_traceback_frames(e[38;5;241m.[39m__traceback__)
+[1;32m    120[0m     [38;5;66;03m# To get the full stack trace, call:[39;00m
+[1;32m    121[0m     [38;5;66;03m# `keras.config.disable_traceback_filtering()`[39;00m
+[0;32m--> 122[0m     [38;5;28;01mraise[39;00m e[38;5;241m.[39mwith_traceback(filtered_tb) [38;5;28;01mfrom[39;00m[38;5;250m [39m[38;5;28;01mNone[39;00m
+[1;32m    123[0m [38;5;28;01mfinally[39;00m:
+[1;32m    124[0m     [38;5;28;01mdel[39;00m filtered_tb
+
+File [0;32m~/Library/Python/3.9/lib/python/site-packages/keras/src/saving/saving_lib.py:146[0m, in [0;36msave_model[0;34m(model, filepath, weights_format, zipped)[0m
+[1;32m    144[0m         f[38;5;241m.[39mwrite(zip_filepath[38;5;241m.[39mgetvalue())
+[1;32m    145[0m [38;5;28;01melse[39;00m:
+[0;32m--> 146[0m     [38;5;28;01mwith[39;00m [38;5;28;43mopen[39;49m[43m([49m[43mfilepath[49m[43m,[49m[43m [49m[38;5;124;43m"[39;49m[38;5;124;43mwb[39;49m[38;5;124;43m"[39;49m[43m)[49m [38;5;28;01mas[39;00m f:
+[1;32m    147[0m         _save_model_to_fileobj(model, f, weights_format)
+
+[0;31mFileNotFoundError[0m: [Errno 2] No such file or directory: 'models/transformer/transformer_cnn_gnn_mlp1.keras'
+
+
+Loading notebook: /Users/rakibhhridoy/Five_Rivers/gis/SedimentRainyAE/Transformer CNN GNN MLP.ipynb
+Changed working directory to: /Users/rakibhhridoy/Five_Rivers/gis/SedimentRainyAE
+✓ Modified ALPHA_EARTH_OPTION to 'B'
+Executing notebook...
+✗ Notebook execution failed
+Error type: CellExecutionError
+Error message: An error occurred while executing the following cell:
+------------------
+import pandas as pd
+import numpy as np
+import glob
+import os
+import rasterio
+from rasterio.windows import Window
+from scipy.spatial import distance_matrix
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import r2_score, mean_squared_error
+from sklearn.model_selection import KFold
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, Flatten, Dense, Concatenate, Dropout, MultiHeadAttention, LayerNormalization, Reshape
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.utils import Sequence
+import tensorflow as tf
+import gc # Import garbage collector
+import pickle # Import the pickle library for saving objects
+import matplotlib.pyplot as plt # Import matplotlib for plotting
+# Define the single buffer size to use
+BUFFER_METERS = 500
+# ==================== 1. Load Data =======
+
+Full traceback:

@@ -1,0 +1,306 @@
+\onehalfspacing
+
+\subsection{CNN GNN MLP Algorithm}
+
+\paragraph{Data Preprocessing} 
+The dataset consists of feature variables (\(\mathbf{X}_i\)) such as water quality parameters and spatial coordinates.
+The columns such as \texttt{Stations}, \texttt{River}, \texttt{Lat}, \texttt{Long}, and \texttt{geometry} are dropped, and only numeric columns are retained for further processing.
+Missing values are handled by filling them with zeros:
+\[
+\mathbf{X}_i = \text{FillNaN}(\mathbf{X}_i, 0) \tag{1}
+\]
+The data is split into training and testing sets using a random seed, and the target variable \(y\) (RI) is extracted.
+
+\paragraph{CNN Input Data}
+The raster data for CNN input is collected from various layers (Indices, LULC, IDW). The coordinate pairs are used to extract patches from each raster layer using the windowing technique in \texttt{rasterio}:
+\[
+\mathbf{patch}_i = \text{ExtractPatch}(\mathbf{coords}, \mathbf{raster\_files}) \tag{2}
+\]
+The patches are normalized to avoid division by zero:
+\[
+\mathbf{patch}_i = \frac{\mathbf{patch}_i}{\text{max}(\mathbf{patch}_i) + \epsilon} \tag{3}
+\]
+where \(\epsilon = 1e-8\) is a small constant added for stability.
+
+\paragraph{MLP Input Data}
+For the MLP branch, features are extracted from numeric columns and standardized using the \texttt{StandardScaler}:
+\[
+\mathbf{X}_i^{\text{mlp}} = \text{Standardize}(\mathbf{X}_i^{\text{numeric}}) \tag{4}
+\]
+
+\paragraph{GNN Input Data}
+The spatial relationship between data points is modeled as a graph using a distance-based kernel:
+\[
+\mathbf{G}_{ij} = \exp\left( -\frac{d_{ij}}{\tau} \right) \tag{5}
+\]
+where \(d_{ij}\) is the Euclidean distance between coordinates \(i\) and \(j\), and \(\tau\) is a kernel parameter. The graph is used as input to the GNN branch.
+
+\paragraph{CNN Branch:} The CNN branch consists of two convolutional layers followed by max-pooling layers. The output is flattened and passed through a dense layer:
+\[
+\mathbf{h}_i^{\text{cnn}} = \text{Flatten}(\text{MaxPooling}(\text{Conv2D}(\mathbf{patch}_i))) \tag{6}
+\]
+
+\paragraph{MLP Branch:} The MLP branch processes the numerical input through fully connected layers:
+\[
+\mathbf{h}_i^{\text{mlp}} = \text{Dense}(\text{ReLU}(\mathbf{X}_i^{\text{mlp}})) \tag{7}
+\]
+
+\paragraph{GNN Branch:} The GNN branch processes the graph input using graph-based convolutions or attention mechanisms:
+\[
+\mathbf{h}_i^{\text{gnn}} = \text{Dense}(\text{ReLU}(\mathbf{G}_i)) \tag{8}
+\]
+
+\paragraph{Fusion Layer}
+The outputs from all branches are concatenated:
+\[
+\mathbf{z}_i = \text{Concatenate}(\mathbf{h}_i^{\text{cnn}}, \mathbf{h}_i^{\text{mlp}}, \mathbf{h}_i^{\text{gnn}}) \tag{9}
+\]
+The concatenated vector is passed through dense layers:
+\[
+\mathbf{f}_i = \text{Dense}(\text{ReLU}(\mathbf{z}_i)) \tag{10}
+\]
+\[
+\hat{y}_i = \text{Dense}(\mathbf{f}_i) \tag{11}
+\]
+
+
+
+\subsection{CNN, GNN, MLP with PMF GWR Algorithm}
+
+\paragraph{Data Input:}
+The data input structure for this model remains the same as the standard CNN, GNN, and MLP model. However, the key addition here is the use of Probabilistic Matrix Factorization (PMF) and Geographically Weighted Regression (GWR) for graph feature embedding. The inputs are:
+- Raster data for CNN input: \(\tilde{\mathcal{P}}_i\),
+- Tabular data for MLP input: \(\tilde{\mathbf{x}}_i\),
+- Graph data for GNN input: \(\mathbf{g}_i\).
+
+\paragraph{PMF-based Graph Embedding:}
+PMF is used to embed the graph kernel \(\mathbf{G}_{ij}\) computed from the graph distance. The graph kernel is defined as:
+\[
+\mathbf{G}_{ij} = \exp\left( -\frac{d_{ij}}{\tau} \right), \tag{12}
+\]
+where $d_{ij}$ is the Euclidean distance between sites $i$ and $j$, and $\tau$ is the kernel parameter. The graph-based features are then processed through the GNN branch after PMF embedding.
+
+\subsection{CNN, GAT, MLP Algorithm}
+
+\paragraph{Data Input:}
+The input structure remains the same as the previous model, with raster data for CNN, tabular data for MLP, and graph data for GAT. The key difference lies in the processing of graph features via Graph Attention Networks (GAT).
+
+\paragraph{Graph Attention Network (GAT) Input:}
+In GAT, we compute the attention weight for each node \(i\)’s neighbors \(j\) based on the graph kernel:
+\[
+\mathbf{A}_{ij} = \frac{\exp\left( \mathbf{e}_{ij} \right)}{\sum_{k=1}^{n} \exp\left( \mathbf{e}_{ik} \right)}, \tag{13}
+\]
+where \(\mathbf{e}_{ij} = \text{LeakyReLU}(\mathbf{W}_\text{att}[\mathbf{h}_i \parallel \mathbf{h}_j])\) is the attention coefficient, \(\mathbf{W}_\text{att}\) is the learnable weight matrix, and \(\parallel\) represents concatenation. The attention mechanism aggregates the neighbors' features weighted by \(\mathbf{A}_{ij}\):
+\[
+\mathbf{h}_i^{\text{att}} = \sum_{j=1}^{n} \mathbf{A}_{ij} \mathbf{h}_j. \tag{14}
+\]
+
+\subsection{Transformer CNN GNN MLP Algorithm}
+
+\paragraph{Data Input:}
+The data input structure is similar to the previous models, with raster patches \(\tilde{\mathcal{P}}_i\) for CNN, tabular features \(\tilde{\mathbf{x}}_i\) for MLP, and graph features \(\mathbf{g}_i\) for GNN.
+
+\paragraph{Transformer Fusion (Multi-Head Attention):}
+The outputs from CNN, MLP, and GNN branches are concatenated into a tensor \(\mathbf{T}_i \in \mathbb{R}^{3 \times d_p}\). The multi-head attention is applied to this tensor as follows:
+\[
+\mathbf{Q}_h = \mathbf{T}_i \mathbf{W}^{Q}_h, \quad
+\mathbf{K}_h = \mathbf{T}_i \mathbf{W}^{K}_h, \quad
+\mathbf{V}_h = \mathbf{T}_i \mathbf{W}^{V}_h, \tag{15}
+\]
+\[
+\text{Attn}_h(\mathbf{T}_i) = \text{softmax}\left( \frac{\mathbf{Q}_h \mathbf{K}_h^\top}{\sqrt{d_k}} \right) \mathbf{V}_h, \tag{16}
+\]
+\[
+\text{MHA}(\mathbf{T}_i) = \big\|_{h=1}^{H} \text{Attn}_h(\mathbf{T}_i) \mathbf{W}^{O}. \tag{17}
+\]
+The multi-head attention outputs are combined, followed by residual connection and layer normalization:
+\[
+\tilde{\mathbf{T}}_i = \mathrm{LayerNorm}\left( \mathbf{T}_i + \text{Dropout}(\text{MHA}(\mathbf{T}_i)) \right). \tag{18}
+\]
+Finally, the flattened result is passed through dense layers for prediction:
+\[
+\mathbf{z}_i = \mathrm{Flatten}(\tilde{\mathbf{T}}_i) \in \mathbb{R}^{3d_p}, \tag{19}
+\]
+\[
+\hat{y}_i = \mathbf{w}_3^\top \mathrm{ReLU}\left( \mathbf{W}_3 \mathrm{Dropout}\left( \mathrm{ReLU}\left( \mathbf{W}_4 \mathbf{z}_i + \mathbf{b}_4 \right) \right) \right) + \mathbf{b}_3. \tag{20}
+\]
+
+\subsection{Stacked CNN GNN MLP Algorithm}
+
+\paragraph{Data Input:}
+In this model, raster, tabular, and graph data are processed separately by the CNN, MLP, and GNN branches. The CNN branch takes \(\tilde{\mathcal{P}}_i\), the MLP branch processes \(\tilde{\mathbf{x}}_i\), and the GNN branch uses \(\mathbf{g}_i\).
+
+\paragraph{Model Architecture:}
+The outputs of each branch are concatenated into a single vector \(\mathbf{z}_i\):
+\[
+\mathbf{z}_i = \text{Concatenate}(\mathbf{h}_i^{\text{cnn}}, \mathbf{h}_i^{\text{mlp}}, \mathbf{h}_i^{\text{gnn}}). \tag{21}
+\]
+This concatenated vector is passed through fully connected layers for prediction:
+\[
+\mathbf{f}_i = \text{Dense}(\text{ReLU}(\mathbf{z}_i)), \tag{22}
+\]
+\[
+\hat{y}_i = \mathbf{W}_5 \mathbf{f}_i + \mathbf{b}_5. \tag{23}
+\]
+
+\subsection{GNN MLP Autoencoder Algorithm}
+
+\paragraph{Data Input:}
+In this model, the graph data \(\mathbf{g}_i\) is passed through the GNN branch, and the tabular data \(\tilde{\mathbf{x}}_i\) is passed through the MLP branch. These two branches' outputs are concatenated.
+
+\paragraph{Latent Representation:}
+The GNN and MLP outputs are concatenated to form the latent representation \(\mathbf{z}_i\):
+\[
+\mathbf{z}_i = \text{Concatenate}(\mathbf{h}_i^{\text{gnn}}, \mathbf{h}_i^{\text{mlp}}). \tag{24}
+\]
+
+\paragraph{Decoder:}
+The latent representation \(\mathbf{z}_i\) is decoded to reconstruct the target \(\hat{y}_i\):
+\[
+\mathbf{f}_i = \text{Dense}(\text{ReLU}(\mathbf{W}_3 \mathbf{z}_i + \mathbf{b}_3)), \tag{25}
+\]
+\[
+\hat{y}_i = \mathbf{W}_4 \mathbf{f}_i + \mathbf{b}_4. \tag{26}
+\]
+
+\subsection{Mixture of Experts Algorithm}
+
+\paragraph{Data Input:}
+The model consists of three experts: CNN, MLP, and GNN. Each expert processes different types of input data, and their outputs are combined using a gating network.
+
+\paragraph{CNN Expert:}
+The CNN expert processes raster data as follows:
+\[
+\mathbf{h}_i^{\text{cnn}} = \text{Flatten}(\text{MaxPool}(\text{Conv2D}(\tilde{\mathcal{P}}_i))). \tag{27}
+\]
+
+\paragraph{MLP Expert:}
+The MLP expert processes tabular data:
+\[
+\mathbf{h}_i^{\text{mlp}} = \text{ReLU}(\mathbf{W}_1 \tilde{\mathbf{x}}_i + \mathbf{b}_1). \tag{28}
+\]
+
+\paragraph{GNN Expert:}
+The GNN expert processes graph data:
+\[
+\mathbf{h}_i^{\text{gnn}} = \text{ReLU}(\mathbf{U}_1 \mathbf{g}_i + \mathbf{c}_1). \tag{29}
+\]
+
+\paragraph{Gating Network:}
+The gating network computes a weight for each expert's output. The weights are computed as follows:
+\[
+\text{Gate Input} = [\mathbf{h}_i^{\text{cnn}}, \mathbf{h}_i^{\text{mlp}}, \mathbf{h}_i^{\text{gnn}}], \tag{30}
+\]
+\[
+\text{Gate Weights} = \text{Softmax}(\text{Dense}(\text{ReLU}(\text{Gate Input}))), \tag{31}
+\]
+\[
+\hat{y}_i = \sum_{j=1}^{3} w_j \cdot y_j. \tag{32}
+\]
+
+\subsection{Dual Attention Algorithm}
+
+\paragraph{Data Input:}
+The data input consists of raster data \(\tilde{\mathcal{P}}_i\) for CNN, tabular data \(\tilde{\mathbf{x}}_i\) for MLP, and graph data \(\mathbf{g}_i\) for GNN.
+
+\paragraph{CNN with Spatial Attention:}
+Spatial attention is applied to the CNN output:
+\[
+\text{Spatial Attention Map} = \sigma(\text{Conv1x1}(\tilde{\mathcal{P}}_i)), \tag{33}
+\]
+\[
+X_{\text{cnn\_attn}} = X_{\text{cnn}} \cdot \text{Spatial Attention Map}. \tag{34}
+\]
+
+\paragraph{Feature Attention:}
+Feature attention is applied to the MLP and GNN outputs:
+\[
+X_{\text{mlp\_attn}} = X_{\text{mlp}} \cdot \text{Feature Attention Map}, \quad
+X_{\text{gnn\_attn}} = X_{\text{gnn}} \cdot \text{Feature Attention Map}. \tag{35}
+\]
+
+\paragraph{Gating Network:}
+The outputs of the attention-modulated branches are combined:
+\[
+\text{Gate Input} = [\mathbf{h}_i^{\text{cnn}}, \mathbf{h}_i^{\text{mlp}}, \mathbf{h}_i^{\text{gnn}}], \tag{36}
+\]
+\[
+\text{Gate Network} = \text{Dense}(\text{ReLU}(\text{Dense}(\text{Gate Input}))), \tag{37}
+\]
+\[
+\hat{y}_i = \sum_{j=1}^{3} w_j \cdot y_j. \tag{38}
+\]
+
+\subsection{Evaluation Metrics}
+For predictions \(\hat{y}_i\) and truths \(y_i\):
+\[
+R^2 = 1 - \frac{\sum_i (y_i-\hat{y}_i)^2}{\sum_i (y_i-\bar{y})^2},\qquad
+\mathrm{RMSE}=\sqrt{\frac{1}{N}\sum_i (y_i-\hat{y}_i)^2}, \tag{39}
+\]
+\[
+\mathrm{MAE}=\frac{1}{N}\sum_i |y_i-\hat{y}_i|,\qquad
+\mathrm{SMAPE}=\frac{100}{N}\sum_{i=1}^N \frac{|\,\hat{y}_i-y_i\,|}{\tfrac{1}{2}\big(|y_i|+|\hat{y}_i|\big)+\varepsilon}, \tag{40}
+\]
+with a small \(\varepsilon\) to avoid division by zero.
+
+
+
+
+\subsection{Permutation Feature Importance}
+Permutation Feature Importance (PFI) evaluates the impact of individual features on the performance of the model. The key concept is to permute the values of a feature and observe how it affects the model's performance. The following steps describe the algorithm:
+
+\paragraph{Train the model} on the original dataset and compute the baseline performance, \( R^2_{\text{baseline}} \).
+
+\paragraph{Permute the feature values} for each feature \( f_k \) in the dataset:
+\[
+\mathbf{X}_{\text{shuffled}}^{(k)} = \text{Shuffle}(\mathbf{X}^{(k)}), \tag{41}
+\]
+where \( \mathbf{X}^{(k)} \) represents the feature column \( k \) of the dataset.
+
+\paragraph{Re-evaluate the model} on the permuted data:
+\[
+R^2_{\text{permuted}}^{(k)} = \text{Model}( \mathbf{X}_{\text{shuffled}}^{(k)} ). \tag{42}
+\]
+The importance of each feature \( f_k \) is computed as the difference between the baseline and the permuted model performance:
+\[
+{f_k} = R^2_{\text{baseline}} - R^2_{\text{permuted}}^{(k)}. \tag{43}
+\]
+The greater the reduction in performance, the more important the feature. This method is applied to three types of inputs: the CNN input (raster data), the MLP input (tabular data), and the GNN input (graph-based data). For each, the feature importance is calculated as follows:
+\[
+\text{Importance}_{\text{CNN}} = R^2_{\text{baseline}} - R^2_{\text{permuted\_CNN}} \tag{44}
+\]
+\[
+\text{Importance}_{\text{MLP}} = R^2_{\text{baseline}} - R^2_{\text{permuted\_MLP}} \tag{45}
+\]
+\[
+\text{Importance}_{\text{GNN}} = R^2_{\text{baseline}} - R^2_{\text{permuted\_GNN}}. \tag{46}
+\]
+This allows the identification of the most influential features in the model.
+
+\subsection{LIME (Local Interpretable Model-agnostic Explanations)}
+LIME provides local explanations for individual predictions by approximating the black-box model with an interpretable surrogate model in the neighborhood of the instance being explained. The process is as follows:
+
+\paragraph{Select an instance} \( i \) to explain. For instance, choose the 5th instance in the test set.
+Generate perturbed instances by sampling around the instance \( i \) and perturbing the feature values:
+\[
+\mathbf{X}_{\text{perturbed}}^{(i)} = \mathbf{X}_{\text{base}} + \epsilon, \tag{47}
+\]
+where \( \epsilon \) is a random perturbation.
+
+\paragraph{Predict the outcomes} for each perturbed instance using the black-box model:
+\[
+\hat{y}_{\text{perturbed}} = f(\mathbf{X}_{\text{perturbed}}), \tag{48}
+\]
+where \( f \) represents the black-box model.
+
+\paragraph{Fit a local surrogate model}, typically a linear model or decision tree, on the perturbed data and predicted outcomes:
+\[
+\hat{y} = \mathbf{w}^\top \mathbf{z} + b, \tag{49}
+\]
+where \( \mathbf{w} \) is the coefficient vector, \( \mathbf{z} \) is the perturbed feature vector, and \( b \) is the bias term.
+
+The \paragraph{local model coefficients} \( \mathbf{w} \) provide the explanation of feature importance for the instance being explained. Larger absolute values of \( w_k \) indicate more important features. The final prediction is approximated by the surrogate model:
+\[
+\hat{y}_i = \mathbf{w}_1^\top \mathbf{z}_i + b. \tag{50}
+\]
+where \( \mathbf{z}_i \) is the perturbed feature vector for the instance \( i \), and \( \mathbf{w}_1 \) is the learned weight vector of the local model. In this case, the LIME explainer uses the MLP and GNN features, while keeping the CNN input fixed. The perturbation is done on the features of the MLP and GNN only, and the output is the feature importance of each individual feature in the neighborhood of the instance. The explanation is visualized as a bar plot showing the importance of each feature, as determined by the surrogate model's coefficients \( \mathbf{w}_1 \).

@@ -1,0 +1,577 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{setspace}
+\usepackage{lineno}
+
+\begin{document}
+\onehalfspacing
+\linenumbers
+
+
+\subsection{Algorithms of Transformer CNN GNN MLP Fusion}
+
+\subsubsection{Data Inputs}
+
+Let $\mathcal{R}=\{R_\ell\}_{\ell=1}^{L}$ be the stack of raster layers (Indices, LULC, IDW), each a georeferenced raster.
+For a site $i$ with longitude--latitude coordinates $(\lambda_i,\phi_i)$ and buffer size $B$ (meters), let
+\[
+\mathcal{P}_i \in \mathbb{R}^{H \times W \times L}
+\]
+Denote the multi-channel patch centered at $(\lambda_i,\phi_i)$, where $H=W=2\left\lfloor \frac{B}{\Delta_x}\right\rfloor$ given pixel resolution $\Delta_x$ (similarly for $y$). Channel-wise normalization is applied:
+\[
+\tilde{\mathcal{P}}_i(:,:, \ell) \;=\; 
+\begin{cases}
+\displaystyle \frac{\mathcal{P}_i(:,:, \ell)}{\max(\mathcal{P}_i(:,:, \ell))}, & \text{if } \max(\mathcal{P}_i(:,:, \ell))\neq 0,\\[6pt]
+\mathbf{0}, & \text{otherwise.}
+\end{cases}
+\]
+
+Let $\mathbf{x}_i \in \mathbb{R}^{d}$ be tabular predictors (from the tabular data), standardized via
+\[
+\tilde{\mathbf{x}}_i \;=\; \mathrm{diag}(\bm{\sigma})^{-1}\,(\mathbf{x}_i - \bm{\mu}),
+\]
+with $(\bm{\mu},\bm{\sigma})$ fitted on training data.  
+Let the coordinate matrix be $\mathbf{C}=\begin{bmatrix}\lambda_1 & \phi_1\\ \vdots & \vdots \\ \lambda_n & \phi_n\end{bmatrix}$.
+Define the RBF graph kernel used as the GNN input features:
+\[
+\mathbf{G}_{ij} \;=\; \exp\!\left(-\frac{d_{ij}}{\tau}\right), 
+\quad d_{ij}=\big\|\mathbf{c}_i-\mathbf{c}_j\big\|_2, \ \ \tau>0,
+\]
+with $\tau=10$ in the code. For a test point $i$, $\mathbf{g}_i$ is its row against the training nodes.
+
+The target is ecological risk index (RI) $y_i$. Batches are formed by a generator that yields $\big(\tilde{\mathcal{P}}_i,\,\tilde{\mathbf{x}}_i,\,\mathbf{g}_i\big)\mapsto y_i$.
+
+\paragraph{CNN branch (raster patches).}
+Two convolutional blocks with ReLU and $2\times2$ max pooling:
+\[
+\mathbf{Z}^{(1)} = \mathrm{ReLU}\big(\mathrm{Conv}_{3\times3}^{32}(\tilde{\mathcal{P}}_i)\big),\quad
+\mathbf{Z}^{(1)}_{\downarrow}=\mathrm{MaxPool}_{2\times2}\big(\mathbf{Z}^{(1)}\big),
+\]
+\[
+\mathbf{Z}^{(2)} = \mathrm{ReLU}\big(\mathrm{Conv}_{3\times3}^{64}(\mathbf{Z}^{(1)}_{\downarrow})\big),\quad
+\mathbf{Z}^{(2)}_{\downarrow}=\mathrm{MaxPool}_{2\times2}\big(\mathbf{Z}^{(2)}\big),
+\]
+\[
+\mathbf{h}^{\mathrm{cnn}}_i = \mathrm{Flatten}\big(\mathbf{Z}^{(2)}_{\downarrow}\big)\in\mathbb{R}^{m}.
+\]
+
+\paragraph{MLP branch (tabular).}
+\[
+\mathbf{h}^{\mathrm{mlp}}_i = \mathrm{ReLU}\!\left(\mathbf{W}_2\,\mathrm{ReLU}\!\left(\mathbf{W}_1\,\tilde{\mathbf{x}}_i+\mathbf{b}_1\right)+\mathbf{b}_2\right)\in\mathbb{R}^{64}.
+\]
+
+\paragraph{GNN branch (graph features).}
+Implemented as dense layers over $\mathbf{g}_i$.
+\[
+\mathbf{h}^{\mathrm{gnn}}_i = \mathrm{ReLU}\!\left(\mathbf{U}_2\,\mathrm{ReLU}\!\left(\mathbf{U}_1\,\mathbf{g}_i+\mathbf{c}_1\right)+\mathbf{c}_2\right)\in\mathbb{R}^{64}.
+\]
+
+\paragraph{Projection to a common token space.}
+Each branch is projected to $d_p=64$ and reshaped as one token:
+\[
+\mathbf{t}^{\mathrm{cnn}}_i=\mathbf{P}_{\mathrm{cnn}}\mathbf{h}^{\mathrm{cnn}}_i,\quad
+\mathbf{t}^{\mathrm{mlp}}_i=\mathbf{P}_{\mathrm{mlp}}\mathbf{h}^{\mathrm{mlp}}_i,\quad
+\mathbf{t}^{\mathrm{gnn}}_i=\mathbf{P}_{\mathrm{gnn}}\mathbf{h}^{\mathrm{gnn}}_i,\quad
+\mathbf{T}_i=\begin{bmatrix}\mathbf{t}^{\mathrm{cnn}}_i\\ \mathbf{t}^{\mathrm{mlp}}_i\\ \mathbf{t}^{\mathrm{gnn}}_i\end{bmatrix}\in\mathbb{R}^{3\times d_p}.
+\]
+
+\paragraph{Transformer fusion (single encoder block).}
+With $H=4$ heads and key dimension $d_k=d_p$, define for head $h$:
+\[
+\mathbf{Q}_h=\mathbf{T}_i\mathbf{W}^{Q}_h,\quad
+\mathbf{K}_h=\mathbf{T}_i\mathbf{W}^{K}_h,\quad
+\mathbf{V}_h=\mathbf{T}_i\mathbf{W}^{V}_h,
+\]
+\[
+\mathrm{Attn}_h(\mathbf{T}_i)=\mathrm{softmax}\!\left(\frac{\mathbf{Q}_h\mathbf{K}_h^\top}{\sqrt{d_k}}\right)\mathbf{V}_h,\quad
+\mathrm{MHA}(\mathbf{T}_i)=\big\|_{h=1}^{H}\mathrm{Attn}_h(\mathbf{T}_i)\,\mathbf{W}^{O}.
+\]
+Dropout and residual LayerNorm:
+\[
+\tilde{\mathbf{T}}_i=\mathrm{LayerNorm}\!\Big(\mathbf{T}_i+\mathrm{Dropout}(\mathrm{MHA}(\mathbf{T}_i))\Big)\in\mathbb{R}^{3\times d_p}.
+\]
+Flatten and regress:
+\[
+\mathbf{z}_i = \mathrm{Flatten}(\tilde{\mathbf{T}}_i) \in \mathbb{R}^{3d_p}
+\]
+\[
+\hat{y}_i = \mathbf{w}_3^\top \, \mathrm{ReLU}\left( \mathbf{W}_3 \, \mathrm{Dropout}\left( \mathrm{ReLU}\left( \mathbf{W}_4 \mathbf{z}_i + \mathbf{b}_4 \right) \right) + \mathbf{b}_3 \right).
+\]
+
+The overall predictive mapping implemented by the model is
+\[
+f:\ \big(\tilde{\mathcal{P}}_i,\tilde{\mathbf{x}}_i,\mathbf{g}_i\big)\ \longmapsto\ \hat{y}_i
+\]
+where $f$ is the composition of CNN feature extraction, MLP projection, graph-feature embedding, transformer fusion with multi-head self-attention across modality tokens, and final dense regression.
+
+\subsection{Algorithm for GNN MLP Autoencoder}
+
+\paragraph{Data Inputs}
+Given the input data:
+\(\mathbf{X}_{\text{train}}\) and \(\mathbf{X}_{\text{test}}\) are the feature matrices, where each row represents a data point with tabular predictors. The features are standardized:
+\[
+\tilde{\mathbf{X}}_i = \mathrm{diag}(\bm{\sigma})^{-1} (\mathbf{X}_i - \bm{\mu})
+\]
+where \(\bm{\mu}\) is the mean, and \(\bm{\sigma}\) is the standard deviation. The graph structure is represented by \(\mathbf{G}_{\text{train}}\) and \(\mathbf{G}_{\text{test}}\), with the graph kernel computed using a distance function:
+\[
+\mathbf{G}_{ij} = \exp\left( -\frac{d_{ij}}{\tau} \right)
+\]
+where \(d_{ij}\) is the Euclidean distance between nodes \(i\) and \(j\) in the graph, and \(\tau\) is a kernel parameter. The target values are \(y_{\text{train}}\) and \(y_{\text{test}}\), which represent the ecological risk index (RI) for the training and test sets.
+
+\paragraph{MLP Branch.} The MLP branch starts with an input layer of shape \((\mathbf{X})\), which is processed through dense layers:
+\[
+\mathbf{h}^{\text{mlp}}_i = \mathrm{ReLU}(\mathbf{W}_1 \mathbf{X}_i + \mathbf{b}_1)
+\]
+followed by:
+\[
+\mathbf{h}^{\text{mlp}}_i = \mathrm{ReLU}(\mathbf{W}_2 \mathbf{h}^{\text{mlp}}_i + \mathbf{b}_2)
+\]
+where \(\mathbf{h}^{\text{mlp}}_i\) represents the embedded output of the MLP branch.
+
+\paragraph{GNN Branch.} The graph-based input \(\mathbf{G}_i\) is passed through a dense layer:
+\[
+\mathbf{h}^{\text{gnn}}_i = \mathrm{ReLU}(\mathbf{U}_1 \mathbf{G}_i + \mathbf{c}_1)
+\]
+\[
+\mathbf{h}^{\text{gnn}}_i = \mathrm{ReLU}(\mathbf{U}_2 \mathbf{h}^{\text{gnn}}_i + \mathbf{c}_2)
+\]
+This yields the graph embedding \(\mathbf{h}^{\text{gnn}}_i\).
+
+\paragraph{Bottleneck / Latent Space.} The outputs of both the MLP and GNN branches are concatenated to form the latent space:
+\[
+\mathbf{z}_i = \mathrm{Concatenate}(\mathbf{h}^{\text{mlp}}_i, \mathbf{h}^{\text{gnn}}_i) \in \mathbb{R}^{2 \times 64}.
+\]
+
+\paragraph{Decoder.} The latent vector \(\mathbf{z}_i\) is passed through fully connected layers for prediction:
+\[
+\mathbf{f}_i = \mathrm{ReLU}(\mathbf{W}_3 \mathbf{z}_i + \mathbf{b}_3)
+\]
+\[
+\hat{y}_i = \mathbf{W}_4 \mathbf{f}_i + \mathbf{b}_4
+\]
+where \(\hat{y}_i\) is the predicted value (RI).
+
+\paragraph{Loss Function}
+The model is trained to minimize the mean squared error (MSE) between the true and predicted values:
+\[
+\mathcal{L}_{\text{MSE}} = \frac{1}{N} \sum_{i=1}^{N} \left( y_i - \hat{y}_i \right)^2
+\]
+where \(y_i\) is the true target, and \(\hat{y}_i\) is the model's prediction. The entire workflow from data input to output prediction is summarized as follows:
+\[
+f: \Big(\mathbf{X}_i, \mathbf{G}_i\Big) \longmapsto \hat{y}_i
+\]
+where \(\mathbf{X}_i\) represents the MLP input (standardized features), \(\mathbf{G}_i\) represents the GNN input (graph-based features), and \(\hat{y}_i\) is the predicted output (RI).
+
+
+
+
+
+\subsection{Algorithm for CNN GNN MLP with PMF GWR}
+
+\paragraph{Data Inputs}
+Given the input data:
+\(\mathbf{X}_{\text{train}}\) and \(\mathbf{X}_{\text{test}}\) are the feature matrices, where each row represents a data point with tabular predictors. The features are standardized:
+\[
+\tilde{\mathbf{X}}_i = \mathrm{diag}(\bm{\sigma})^{-1} (\mathbf{X}_i - \bm{\mu}),
+\]
+where \(\bm{\mu}\) is the mean, and \(\bm{\sigma}\) is the standard deviation. The graph structure is represented by \(\mathbf{G}_{\text{train}}\) and \(\mathbf{G}_{\text{test}}\), with the graph kernel computed using a distance function:
+\[
+\mathbf{G}_{ij} = \exp\left( -\frac{d_{ij}}{\tau} \right),
+\]
+where \(d_{ij}\) is the Euclidean distance between nodes \(i\) and \(j\) in the graph, and \(\tau\) is a kernel parameter. The target values are \(y_{\text{train}}\) and \(y_{\text{test}}\), which represent the water quality index (RI) for the training and test sets.
+
+\paragraph{CNN Branch.} The CNN branch starts with an input layer of shape \((\mathbf{X})\), which is processed through convolutional layers:
+\[
+\mathbf{h}^{\text{cnn}}_i = \mathrm{ReLU}(\mathbf{W}_1 \mathbf{X}_i + \mathbf{b}_1)
+\]
+\[
+\mathbf{h}^{\text{cnn}}_i = \mathrm{ReLU}(\mathbf{W}_2 \mathbf{h}^{\text{cnn}}_i + \mathbf{b}_2)
+\]
+This outputs the CNN embedding \(\mathbf{h}^{\text{cnn}}_i\).
+
+\paragraph{MLP Branch.} The MLP branch is a fully connected network that processes tabular data:
+\[
+\mathbf{h}^{\text{mlp}}_i = \mathrm{ReLU}(\mathbf{W}_3 \mathbf{X}_i + \mathbf{b}_3),
+\]
+
+\paragraph{GNN Branch.} The graph-based input \(\mathbf{G}_i\) is passed through dense layers:
+\[
+\mathbf{h}^{\text{gnn}}_i = \mathrm{ReLU}(\mathbf{U}_1 \mathbf{G}_i + \mathbf{c}_1)
+\]
+\[
+\mathbf{h}^{\text{gnn}}_i = \mathrm{ReLU}(\mathbf{U}_2 \mathbf{h}^{\text{gnn}}_i + \mathbf{c}_2)
+\]
+
+\paragraph{Bottleneck / Latent Space.} The outputs of both the CNN and MLP branches are concatenated to form the latent space:
+\[
+\mathbf{z}_i = \mathrm{Concatenate}(\mathbf{h}^{\text{cnn}}_i, \mathbf{h}^{\text{mlp}}_i, \mathbf{h}^{\text{gnn}}_i) \in \mathbb{R}^{2 \times 64}.
+\]
+
+\paragraph{Decoder.} The latent space vector \(\mathbf{z}_i\) is passed through fully connected layers for prediction:
+\[
+\mathbf{f}_i = \mathrm{ReLU}(\mathbf{W}_4 \mathbf{z}_i + \mathbf{b}_4)
+\]
+\[
+\hat{y}_i = \mathbf{W}_5 \mathbf{f}_i + \mathbf{b}_5
+\]
+
+
+
+
+
+\subsection{Algorithm for CNN GAT MLP Model}
+
+\paragraph{Notation and Data Inputs:}
+\(\mathbf{X}_{\text{train}}\) and \(\mathbf{X}_{\text{test}}\) are the feature matrices, where each row represents a data point with tabular predictors. The features are standardized:
+\[
+\tilde{\mathbf{X}}_i = \mathrm{diag}(\bm{\sigma})^{-1} (\mathbf{X}_i - \bm{\mu}),
+\]
+where \(\bm{\mu}\) is the mean, and \(\bm{\sigma}\) is the standard deviation. The graph structure is represented by \(\mathbf{G}_{\text{train}}\) and \(\mathbf{G}_{\text{test}}\), with the graph kernel computed using a distance function:
+\[
+\mathbf{G}_{ij} = \exp\left( -\frac{d_{ij}}{\tau} \right)
+\]
+where \(d_{ij}\) is the Euclidean distance between nodes \(i\) and \(j\) in the graph, and \(\tau\) is a kernel parameter. The target values are \(y_{\text{train}}\) and \(y_{\text{test}}\), which represent the water quality index (RI) for the training and test sets.
+
+\paragraph{CNN Branch.} The CNN branch starts with an input layer of shape \((\mathbf{X})\), which is processed through convolutional layers:
+\[
+\mathbf{h}^{\text{cnn}}_i = \mathrm{ReLU}(\mathbf{W}_1 \mathbf{X}_i + \mathbf{b}_1)
+\]
+\[
+\mathbf{h}^{\text{cnn}}_i = \mathrm{ReLU}(\mathbf{W}_2 \mathbf{h}^{\text{cnn}}_i + \mathbf{b}_2)
+\]
+
+\paragraph{MLP Branch.} The MLP branch is a fully connected network that processes tabular data:
+\[
+\mathbf{h}^{\text{mlp}}_i = \mathrm{ReLU}(\mathbf{W}_3 \mathbf{X}_i + \mathbf{b}_3),
+\]
+
+\paragraph{GAT Branch.} The graph-based input \(\mathbf{G}_i\) is processed using Graph Attention Networks (GAT). Each node in the graph attends to other nodes to obtain a weighted sum of their features:
+\[
+\mathbf{h}^{\text{gat}}_i = \mathrm{Attention}\left(\mathbf{W}_4 \mathbf{G}_i + \mathbf{b}_4\right),
+\]
+\[
+\mathbf{h}^{\text{gat}}_i = \mathrm{ReLU}(\mathbf{W}_5 \mathbf{h}^{\text{gat}}_i + \mathbf{b}_5).
+\]
+This generates the GAT embedding \(\mathbf{h}^{\text{gat}}_i\).
+
+\paragraph{Bottleneck / Latent Space.} The outputs of both the CNN, MLP, and GAT branches are concatenated to form the latent space:
+\[
+\mathbf{z}_i = \mathrm{Concatenate}(\mathbf{h}^{\text{cnn}}_i, \mathbf{h}^{\text{mlp}}_i, \mathbf{h}^{\text{gat}}_i) \in \mathbb{R}^{3 \times 64}.
+\]
+
+\paragraph{Decoder.} The latent space vector \(\mathbf{z}_i\) is passed through fully connected layers for prediction:
+\[
+\mathbf{f}_i = \mathrm{ReLU}(\mathbf{W}_6 \mathbf{z}_i + \mathbf{b}_6)
+\]
+\[
+\hat{y}_i = \mathbf{W}_7 \mathbf{f}_i + \mathbf{b}_7
+\]
+
+
+\subsection{Algorithm of CNN GNN MLP}
+
+\paragraph{Data Preprocessing} 
+The dataset consists of feature variables (\(\mathbf{X}_i\)) such as water quality parameters and spatial coordinates.
+The columns such as \texttt{Stations}, \texttt{River}, \texttt{Lat}, \texttt{Long}, and \texttt{geometry} are dropped, and only numeric columns are retained for further processing.
+Missing values are handled by filling them with zeros:
+\[
+\mathbf{X}_i = \text{FillNaN}(\mathbf{X}_i, 0)
+\]
+The data is split into training and testing sets using a random seed, and the target variable \(y\) (RI) is extracted.
+
+\paragraph{CNN Input Data}
+The raster data for CNN input is collected from various layers (Indices, LULC, IDW). The coordinate pairs are used to extract patches from each raster layer using the windowing technique in \texttt{rasterio}:
+\[
+\mathbf{patch}_i = \text{ExtractPatch}(\mathbf{coords}, \mathbf{raster\_files})
+\]
+The patches are normalized to avoid division by zero:
+\[
+\mathbf{patch}_i = \frac{\mathbf{patch}_i}{\text{max}(\mathbf{patch}_i) + \epsilon}
+\]
+where \(\epsilon = 1e-8\) is a small constant added for stability.
+
+\paragraph{MLP Input Data}
+For the MLP branch, features are extracted from numeric columns and standardized using the \texttt{StandardScaler}:
+\[
+\mathbf{X}_i^{\text{mlp}} = \text{Standardize}(\mathbf{X}_i^{\text{numeric}})
+\]
+
+\paragraph{GNN Input Data}
+The spatial relationship between data points is modeled as a graph using a distance-based kernel:
+\[
+\mathbf{G}_{ij} = \exp\left( -\frac{d_{ij}}{\tau} \right)
+\]
+where \(d_{ij}\) is the Euclidean distance between coordinates \(i\) and \(j\), and \(\tau\) is a kernel parameter. The graph is used as input to the GNN branch.
+
+\paragraph{CNN Branch:} The CNN branch consists of two convolutional layers followed by max-pooling layers. The output is flattened and passed through a dense layer:
+\[
+\mathbf{h}_i^{\text{cnn}} = \text{Flatten}(\text{MaxPooling}(\text{Conv2D}(\mathbf{patch}_i)))
+\]
+
+\paragraph{MLP Branch:} The MLP branch processes the numerical input through fully connected layers:
+\[
+\mathbf{h}_i^{\text{mlp}} = \text{Dense}(\text{ReLU}(\mathbf{X}_i^{\text{mlp}}))
+\]
+
+\paragraph{GNN Branch:} The GNN branch processes the graph input using graph-based convolutions or attention mechanisms:
+\[
+\mathbf{h}_i^{\text{gnn}} = \text{Dense}(\text{ReLU}(\mathbf{G}_i))
+\]
+
+\paragraph{Fusion Layer}
+The outputs from all branches are concatenated:
+\[
+\mathbf{z}_i = \text{Concatenate}(\mathbf{h}_i^{\text{cnn}}, \mathbf{h}_i^{\text{mlp}}, \mathbf{h}_i^{\text{gnn}})
+\]
+The concatenated vector is passed through dense layers:
+\[
+\mathbf{f}_i = \text{Dense}(\text{ReLU}(\mathbf{z}_i))
+\]
+\[
+\hat{y}_i = \text{Dense}(\mathbf{f}_i)
+\]
+
+
+
+
+\subsection{Stacked CNN GNN MLP Model}
+
+\paragraph{Data Preprocessing}
+The dataset includes water quality parameters and spatial data. The target variable (\( y \)) is the "RI" column.
+Columns like \texttt{Stations}, \texttt{River}, \texttt{Lat}, \texttt{Long}, and \texttt{geometry} are dropped, and numeric columns are retained for further processing.
+Missing values are handled by filling them with zeros:
+\[
+\mathbf{X}_i = \text{FillNaN}(\mathbf{X}_i, 0)
+\]
+ The data is split into training and test sets using a random seed. The target variable (\( y \)) is extracted.
+
+
+\paragraph{Data Extraction for CNN Input}
+The raster data (e.g., \texttt{CalIndices}, \texttt{LULCMerged}, \texttt{IDW}) is used as input for the CNN model. Patches of raster data are extracted for each coordinate and normalized:
+\[
+\mathbf{patch}_i = \text{ExtractPatch}(\mathbf{coords}, \mathbf{raster\_files})
+\]
+Normalization is performed to avoid division by zero:
+\[
+\mathbf{patch}_i = \frac{\mathbf{patch}_i}{\text{max}(\mathbf{patch}_i) + \epsilon}
+\]
+where \(\epsilon = 1e-8\) is a small constant for stability.
+
+\paragraph{MLP Input Data}
+The MLP input is standardized using:
+\[
+\mathbf{X}_i^{\text{mlp}} = \text{Standardize}(\mathbf{X}_i^{\text{numeric}})
+\]
+
+\paragraph{GNN Input Data}
+The graph-based relationship between data points is modeled using a Gaussian kernel on spatial coordinates:
+\[
+\mathbf{G}_{ij} = \exp\left( -\frac{d_{ij}}{\tau} \right)
+\]
+where \( d_{ij} \) is the Euclidean distance between coordinates \( i \) and \( j \), and \( \tau \) is the kernel parameter.
+
+\paragraph{Model Architecture}
+The architecture consists of three branches: CNN, MLP, and GNN, with a meta-learner that combines predictions from the base models.
+
+\paragraph{CNN Branch:} The CNN branch consists of two convolutional layers followed by max-pooling layers, flattened, and passed through a dense layer:
+\[
+\mathbf{h}_i^{\text{cnn}} = \text{Flatten}(\text{MaxPooling}(\text{Conv2D}(\mathbf{patch}_i)))
+\]
+
+\paragraph{MLP Branch:} The MLP branch processes the numeric input through fully connected layers:
+\[
+\mathbf{h}_i^{\text{mlp}} = \text{Dense}(\text{ReLU}(\mathbf{X}_i^{\text{mlp}}))
+\]
+
+\paragraph{GNN Branch:} The GNN branch processes the graph input using graph convolutions:
+\[
+\mathbf{h}_i^{\text{gnn}} = \text{Dense}(\text{ReLU}(\mathbf{G}_i))
+\]
+
+\paragraph{Fusion and Output}
+The outputs from all branches are concatenated:
+\[
+\mathbf{z}_i = \text{Concatenate}(\mathbf{h}_i^{\text{cnn}}, \mathbf{h}_i^{\text{mlp}}, \mathbf{h}_i^{\text{gnn}})
+\]
+\[
+\mathbf{f}_i = \text{Dense}(\text{ReLU}(\mathbf{z}_i))
+\]
+
+\paragraph{Final Output}
+The final prediction is:
+\[
+\hat{y}_i = \text{Dense}(\mathbf{f}_i)
+\]
+
+
+
+
+\subsection*{Algorithm of Mixture of Experts}
+The Mixture of Experts (MoE) model is an ensemble learning technique that combines the predictions from multiple expert models. Each expert model processes different input features and produces an output. A gating network is used to combine the outputs of the experts by assigning a weight to each expert’s prediction. This model aims to leverage the strengths of each expert in making the final prediction. The algorithm for the Mixture of Experts model is as follows:
+
+\paragraph{Expert Models}
+The model consists of three expert models: CNN, MLP, and GNN. Each expert processes different types of input data and produces a prediction.
+
+\paragraph{CNN Expert}
+The CNN expert processes raster data and is composed of the following steps:
+
+\[
+\text{CNN Output} = \text{CNN}(X_{\text{cnn}})
+\]
+\[
+\text{CNN Output} = \text{Flatten}(\text{MaxPooling}(\text{Conv2D}(X_{\text{cnn}})))
+\]
+This expert uses two convolutional layers, followed by max-pooling, to extract spatial features from the raster data.
+
+\paragraph*{MLP Expert}
+The MLP expert processes the numeric site features:
+\[
+\text{MLP Output} = \text{MLP}(X_{\text{mlp}})
+\]
+\[
+\text{MLP Output} = \text{Dense}(\text{Dense}(X_{\text{mlp}}))
+\]
+This expert uses fully connected layers to capture the relationships between site features.
+
+\paragraph*{GNN Expert}
+The GNN expert processes the graph-based spatial data:
+\[
+\text{GNN Output} = \text{GNN}(X_{\text{gnn}})
+\]
+\[
+\text{GNN Output} = \text{Dense}(\text{Dense}(X_{\text{gnn}}))
+\]
+This expert uses dense layers to model the spatial relationships between different sites.
+
+\paragraph{Gating Network}
+The gating network decides the contribution of each expert’s output to the final prediction. The gating network takes the outputs of the dense layers of each expert and computes a weighted sum of these outputs. The network is composed of:
+
+\[
+\text{Gate Input} = [\text{CNN Output}, \text{MLP Output}, \text{GNN Output}]
+\]
+\[
+\text{Gate Network} = \text{Dense}(\text{ReLU}(\text{Dense}(\text{Gate Input}))))
+\]
+\[
+\text{Gate Weights} = \text{Softmax}(\text{Gate Network})
+\]
+The softmax output gives the weights assigned to each expert's output, ensuring that the sum of the weights is equal to 1.
+
+\paragraph{Final Prediction}
+The final prediction is computed as a weighted sum of the outputs from the expert models:
+
+\[
+\hat{y} = \sum_{i=1}^{3} w_i \cdot y_i
+\]
+
+Where \(\hat{y}\) is the final prediction. \(w_i\) is the weight assigned to the \(i^{\text{th}}\) expert by the gating network. \(y_i\) is the output prediction from the \(i^{\text{th}}\) expert.
+
+
+
+
+
+
+\subsection{Algorithm of Dual Attention}
+The Dual Attention Model is a deep learning architecture designed for multi-source data fusion. It integrates three expert networks:
+\paragraph{CNN Expert:} Convolutional Neural Network (CNN) for processing raster data (Indices, LULC, IDW).
+\paragraph{MLP Expert:} Multi-Layer Perceptron (MLP) for processing numerical site-specific features.
+\paragraph{GNN Expert:} Graph Neural Network (GNN) for processing spatial relationships among sites.
+
+The model incorporates two types of attention mechanisms:
+\paragraph{Spatial Attention:} Focuses on significant spatial features within image data.
+\paragraph{Feature Attention:} Focuses on the most informative features from both MLP and GNN data. The final output is a weighted combination of predictions from each expert, with attention weights calculated by a gating network.
+
+
+\paragraph{Expert Models}
+The model contains three expert networks, each specialized in processing a particular type of data:
+
+\paragraph{CNN Expert:}
+\[
+y_{\text{cnn}} = \text{CNN}(X_{\text{cnn}})
+\]
+The CNN model performs convolution, pooling, and flattening operations to generate an embedding for each input image patch.
+\[
+y_{\text{cnn}} = \text{Flatten}(\text{MaxPooling}(\text{Conv2D}(X_{\text{cnn}})))
+\]
+
+\paragraph{MLP Expert:}
+\[
+y_{\text{mlp}} = \text{MLP}(X_{\text{mlp}})
+\]
+The MLP model processes the input site-specific features using fully connected layers:
+\[
+y_{\text{mlp}} = \text{Dense}(\text{Dense}(X_{\text{mlp}}))
+\]
+
+\paragraph{GNN Expert:}
+\[
+y_{\text{gnn}} = \text{GNN}(X_{\text{gnn}})
+\]
+The GNN model processes the adjacency matrix using graph convolutions:
+\[
+y_{\text{gnn}} = \text{Dense}(\text{Dense}(X_{\text{gnn}}))
+\]
+
+\paragraph{Spatial Attention}
+Spatial attention is applied to the CNN output to focus on the most relevant spatial regions:
+\[
+\text{Spatial Attention Map} = \sigma(\text{Conv1x1}(X_{\text{cnn}}))
+\]
+where $\sigma$ denotes the sigmoid activation function, and $\text{Conv1x1}$ is a 1x1 convolutional layer that generates the attention map. The spatial attention map is multiplied with the feature map:
+\[
+X_{\text{cnn\_attn}} = X_{\text{cnn}} \cdot \text{Spatial Attention Map}
+\]
+
+\paragraph{Feature Attention}
+Feature attention is applied to the MLP and GNN outputs. Each feature is weighted according to its importance:
+\[
+\text{Feature Attention Map} = \sigma(\text{Dense}(X))
+\]
+where $\text{Dense}(X)$ refers to a fully connected layer applied to the input data. The output is multiplied by the input:
+\[
+X_{\text{mlp\_attn}} = X_{\text{mlp}} \cdot \text{Feature Attention Map}
+\]
+Similarly, for GNN:
+\[
+X_{\text{gnn\_attn}} = X_{\text{gnn}} \cdot \text{Feature Attention Map}
+\]
+
+\paragraph{Gating Network}
+The gating network computes a weight for each expert's output. The outputs of the dense layers of each expert are concatenated and passed through a series of fully connected layers:
+\[
+\text{Gate Input} = [y_{\text{cnn}}, y_{\text{mlp}}, y_{\text{gnn}}]
+\]
+\[
+\text{Gate Network} = \text{Dense}(\text{ReLU}(\text{Dense}(\text{Gate Input}))))
+\]
+\[
+w_{\text{cnn}}, w_{\text{mlp}}, w_{\text{gnn}} = \text{Softmax}(\text{Gate Network})
+\]
+The gate weights $w_{\text{cnn}}$, $w_{\text{mlp}}$, and $w_{\text{gnn}}$ are the attention weights for each expert's output.
+
+\paragraph{Final Prediction}
+The final prediction is the weighted sum of the experts' outputs:
+\[
+\hat{y} = w_{\text{cnn}} \cdot y_{\text{cnn}} + w_{\text{mlp}} \cdot y_{\text{mlp}} + w_{\text{gnn}} \cdot y_{\text{gnn}}
+\]
+
+
+
+
+
+\subsection{Evaluation Metrics}
+For predictions $\hat{y}_i$ and truths $y_i$:
+\[
+R^2 = 1 - \frac{\sum_i (y_i-\hat{y}_i)^2}{\sum_i (y_i-\bar{y})^2},\qquad
+\mathrm{RMSE}=\sqrt{\frac{1}{N}\sum_i (y_i-\hat{y}_i)^2},
+\]
+\[
+\mathrm{MAE}=\frac{1}{N}\sum_i |y_i-\hat{y}_i|,\qquad
+\mathrm{SMAPE}=\frac{100}{N}\sum_{i=1}^N \frac{|\,\hat{y}_i-y_i\,|}{\tfrac{1}{2}\big(|y_i|+|\hat{y}_i|\big)+\varepsilon},
+\]
+with a small $\varepsilon$ to avoid division by zero.
+
+
+
+\end{document}

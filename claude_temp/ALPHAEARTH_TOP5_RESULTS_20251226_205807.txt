@@ -1,0 +1,21 @@
+
+================================================================================
+ALPHAEARTH TOP 5 MODELS - ANALYSIS REPORT
+================================================================================
+
+Execution Time: 0:00:05.272266
+
+Results (5 total):
+  error: 5
+
+By Season:
+  RAINY: 0/5 succeeded
+
+Failed Runs:
+  rainy Transformer CNN GNN MLP.ipynb OptB: [Errno 2] No such file or directory: 'ju
+  rainy GNN MLP AE.ipynb OptB: [Errno 2] No such file or directory: 'ju
+  rainy CNN GNN MLP PG.ipynb OptB: [Errno 2] No such file or directory: 'ju
+  rainy GNN MLP.ipynb OptB: [Errno 2] No such file or directory: 'ju
+  rainy Stacked CNN GNN MLP.ipynb OptB: [Errno 2] No such file or directory: 'ju
+
+================================================================================

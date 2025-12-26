@@ -1,0 +1,21 @@
+
+================================================================================
+ALPHAEARTH TOP 5 MODELS - ANALYSIS REPORT
+================================================================================
+
+Execution Time: 0:00:04.152288
+
+Results (5 total):
+  error: 5
+
+By Season:
+  WINTER: 0/5 succeeded
+
+Failed Runs:
+  winter Transformer CNN GNN MLP.ipynb OptB: [Errno 2] No such file or directory: 'ju
+  winter GNN MLP AE.ipynb OptB: [Errno 2] No such file or directory: 'ju
+  winter Mixture of Experts.ipynb OptB: [Errno 2] No such file or directory: 'ju
+  winter Stacked CNN GNN MLP.ipynb OptB: [Errno 2] No such file or directory: 'ju
+  winter GNN MLP.ipynb OptB: [Errno 2] No such file or directory: 'ju
+
+================================================================================

@@ -1,0 +1,175 @@
+/Users/rakibhhridoy/Library/Python/3.9/lib/python/site-packages/nbformat/__init__.py:96: MissingIDFieldWarning: Cell is missing an id field, this will become a hard error in future nbformat versions. You may want to use `normalize()` on your notebooks before validations (available since nbformat 5.1.4). Previous versions of nbformat are fixing this issue transparently, and will stop doing so in the future.
+  validate(nb)
+Traceback (most recent call last):
+  File "/Users/rakibhhridoy/Library/Python/3.9/lib/python/site-packages/jupyter_core/utils/__init__.py", line 154, in wrapped
+    asyncio.get_running_loop()
+RuntimeError: no running event loop
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/rakibhhridoy/Five_Rivers/direct_model_run.py", line 50, in run_notebook_direct
+    client.execute()
+  File "/Users/rakibhhridoy/Library/Python/3.9/lib/python/site-packages/jupyter_core/utils/__init__.py", line 158, in wrapped
+    return loop.run_until_complete(inner)
+  File "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/asyncio/base_events.py", line 642, in run_until_complete
+    return future.result()
+  File "/Users/rakibhhridoy/Library/Python/3.9/lib/python/site-packages/nbclient/client.py", line 709, in async_execute
+    await self.async_execute_cell(
+  File "/Users/rakibhhridoy/Library/Python/3.9/lib/python/site-packages/nbclient/client.py", line 1062, in async_execute_cell
+    await self._check_raise_for_error(cell, cell_index, exec_reply)
+  File "/Users/rakibhhridoy/Library/Python/3.9/lib/python/site-packages/nbclient/client.py", line 918, in _check_raise_for_error
+    raise CellExecutionError.from_cell_and_msg(cell, exec_reply_content)
+nbclient.exceptions.CellExecutionError: An error occurred while executing the following cell:
+------------------
+import numpy as np
+import rasterio
+from rasterio.windows import Window
+from sklearn.model_selection import TrainTestSplit
+import pandas as pd
+from scipy.spatial import distance_matrix
+from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+import glob
+# NOTE: The `model` variable and the `extract_patch_for_generator` function
+# are assumed to be loaded in your environment from the previous steps.
+# ==================== 1. Evaluation Function to get Predictions ==================== #
+def evaluate_model_for_predictions(model, coords, mlp_data, gnn_data, raster_paths, buffer_meters, batch_size=4):
+    """
+    Evaluates the model on given data and returns the predicted values.
+    
+    NOTE: This function assumes `extract_patch_for_generator` is available in the environment.
+    """
+    num_samples = len(coords)
+    y_pred_list = []
+    
+    # Pre-calculate patch size from the first raster
+    with rasterio.open(raster_paths[0]) as src:
+        res_x, res_y = src.res
+        buffer_pixels_x = int(buffer_meters / res_x)
+        buffer_pixels_y = int(buffer_meters / res_y)
+        patch_width = 2 * buffer_pixels_x
+        patch_height = 2 * buffer_pixels_y
+    # Extract patches and make predictions in batches
+    for i in range(0, num_samples, batch_size):
+        batch_coords = coords[i:i+batch_size]
+        batch_mlp = mlp_data[i:i+batch_size]
+        batch_gnn = gnn_data[i:i+batch_size, :]
+        
+        batch_cnn = extract_patch_for_generator(
+            batch_coords, raster_paths, buffer_pixels_x, buffer_pixels_y, patch_width, patch_height
+        )
+        
+        y_pred_list.append(model.predict((batch_cnn, batch_mlp, batch_gnn)).flatten())
+        
+    y_pred = np.concatenate(y_pred_list)
+    
+    return y_pred
+# ==================== 2. Plotting Function ==================== #
+def plot_3d_area_results(coords, y_true, y_pred):
+    """
+    Creates a single figure with two 3D area plots for visualization.
+    
+    Args:
+        coords (np.array): The coordinates (longitude, latitude).
+        y_true (np.array): The true RI values.
+        y_pred (np.array): The predicted RI values.
+    """
+    # Create a figure with two subplots side-by-side
+    fig = plt.figure(figsize=(16, 7))
+    
+    # Create a grid for the surface plot
+    x_grid = np.linspace(coords[:, 0].min(), coords[:, 0].max(), 100)
+    y_grid = np.linspace(coords[:, 1].min(), coords[:, 1].max(), 100)
+    X, Y = np.meshgrid(x_grid, y_grid)
+    
+    # Due to the sparse nature of the data, we need to interpolate the RI values
+    # to create a continuous surface. This is a simple interpolation.
+    from scipy.interpolate import griddata
+    Z_true = griddata((coords[:, 0], coords[:, 1]), y_true, (X, Y), method='cubic')
+    Z_pred = griddata((coords[:, 0], coords[:, 1]), y_pred, (X, Y), method='cubic')
+    
+    # First subplot for True RI values (3D surface plot)
+    ax1 = fig.add_subplot(1, 2, 1, projection='3d')
+    surf1 = ax1.plot_surface(X, Y, Z_true, cmap='magma', edgecolor='none')
+    ax1.set_title('True RI')
+    ax1.set_xlabel('Longitude')
+    ax1.set_ylabel('Latitude')
+    ax1.set_zlabel('RI')
+    fig.colorbar(surf1, ax=ax1, shrink=0.3, aspect=10, label='RI Value')
+    
+    # Second subplot for Predicted RI values (3D surface plot)
+    ax2 = fig.add_subplot(1, 2, 2, projection='3d')
+    surf2 = ax2.plot_surface(X, Y, Z_pred, cmap='magma', edgecolor='none')
+    ax2.set_title('Predicted RI')
+    ax2.set_xlabel('Longitude')
+    ax2.set_ylabel('Latitude')
+    ax2.set_zlabel('RI')
+    fig.colorbar(surf2, ax=ax2, shrink=0.3, aspect=10, label='RI Value')
+    
+    plt.tight_layout()
+    plt.savefig('transformer_fusion/RI True Predicted.png', dpi=500)
+    plt.show()
+    
+# NOTE: This call will fail if the 'model' object is not loaded or the 
+# `extract_patch_for_generator` function is not defined.
+y_pred = evaluate_model_for_predictions(
+    model, 
+    coords_val_fold, 
+    mlp_val_fold, 
+    gnn_val_fold, 
+    raster_paths, 
+    BUFFER_METERS, 
+    batch_size
+)
+plot_3d_area_results(coords_val_fold, y_val_fold, y_pred)
+
+------------------
+
+
+[0;31m---------------------------------------------------------------------------[0m
+[0;31mImportError[0m                               Traceback (most recent call last)
+Cell [0;32mIn[23], line 4[0m
+[1;32m      2[0m [38;5;28;01mimport[39;00m[38;5;250m [39m[38;5;21;01mrasterio[39;00m
+[1;32m      3[0m [38;5;28;01mfrom[39;00m[38;5;250m [39m[38;5;21;01mrasterio[39;00m[38;5;21;01m.[39;00m[38;5;21;01mwindows[39;00m[38;5;250m [39m[38;5;28;01mimport[39;00m Window
+[0;32m----> 4[0m [38;5;28;01mfrom[39;00m[38;5;250m [39m[38;5;21;01msklearn[39;00m[38;5;21;01m.[39;00m[38;5;21;01mmodel_selection[39;00m[38;5;250m [39m[38;5;28;01mimport[39;00m TrainTestSplit
+[1;32m      5[0m [38;5;28;01mimport[39;00m[38;5;250m [39m[38;5;21;01mpandas[39;00m[38;5;250m [39m[38;5;28;01mas[39;00m[38;5;250m [39m[38;5;21;01mpd[39;00m
+[1;32m      6[0m [38;5;28;01mfrom[39;00m[38;5;250m [39m[38;5;21;01mscipy[39;00m[38;5;21;01m.[39;00m[38;5;21;01mspatial[39;00m[38;5;250m [39m[38;5;28;01mimport[39;00m distance_matrix
+
+[0;31mImportError[0m: cannot import name 'TrainTestSplit' from 'sklearn.model_selection' (/Users/rakibhhridoy/Library/Python/3.9/lib/python/site-packages/sklearn/model_selection/__init__.py)
+
+
+Loading notebook: /Users/rakibhhridoy/Five_Rivers/gis/SedimentRainyAE/Transformer CNN GNN MLP.ipynb
+Changed working directory to: /Users/rakibhhridoy/Five_Rivers/gis/SedimentRainyAE
+✓ Modified ALPHA_EARTH_OPTION to 'B'
+Executing notebook...
+✗ Notebook execution failed
+Error type: CellExecutionError
+Error message: An error occurred while executing the following cell:
+------------------
+import numpy as np
+import rasterio
+from rasterio.windows import Window
+from sklearn.model_selection import TrainTestSplit
+import pandas as pd
+from scipy.spatial import distance_matrix
+from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+import glob
+# NOTE: The `model` variable and the `extract_patch_for_generator` function
+# are assumed to be loaded in your environment from the previous steps.
+# ==================== 1. Evaluation Function to get Predictions ==================== #
+def evaluate_model_for_predictions(model, coords, mlp_data, gnn_data, raster_paths, buffer_meters, batch_size=4):
+    """
+    Evaluates the model on given data and returns the predicted values.
+    
+    NOTE: This function assumes `extract_patch_for_generator` is available in the environment.
+    """
+    num_samples = len(coords)
+    y_pred_list = []
+    
+    # Pre-calcul
+
+Full traceback:

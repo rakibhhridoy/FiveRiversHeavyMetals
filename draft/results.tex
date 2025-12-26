@@ -1,0 +1,69 @@
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{multirow}
+\usepackage{graphicx} % <-- for resizebox
+
+% Commands for arrows
+\newcommand{\upar}{\textsuperscript{\textcolor{green}{$\uparrow$}}}
+\newcommand{\dnar}{\textsuperscript{\textcolor{red}{$\downarrow$}}}
+
+
+\section{Results And Discussion}
+
+\subsection{Heavy Metal Distribution}
+\input{HeavyMetalDistribution}
+
+\subsection{Igeo}
+\input{Igeo}
+
+\subsection{EF}
+\input{EF}
+
+\subsection{PLI}
+\input{PLI}
+
+\subsection{Health Risk Assessment}
+\input{HealthRisk}
+
+
+\subsection{PCA}
+\input{PCA}
+
+\subsection{Monte Carlo}
+\input{MonteCarlo}
+
+\subsection{Model Performance}
+
+The performance of the ensemble models provided in Table \ref{tab:ModelPerformance} varied significantly between the rainy and winter seasons, with a notable improvement in predictive accuracy during the winter. This seasonal difference provides key insights into the challenges of modeling heavy metal contamination in dynamic riverine systems. In the rainy season, the models faced greater complexity due to increased hydrological flow, sediment redistribution, and the transport of contaminants. Despite these challenges, the Transformer CNN GNN MLP model demonstrated exceptional performance, achieving the highest coefficient of determination ($R^2$) of 0.9604 and the lowest root mean square error (RMSE) of 15.7421. This indicates that its architecture, which is adept at integrating and processing diverse data modalities—specifically, high-dimensional raster patches, tabular attributes, and spatial adjacency information—is particularly effective in capturing the intricate spatiotemporal dynamics of this season. The GNN MLP AE and GNN MLP models also performed very well, with $R^2$ values of 0.9581 and 0.9519, respectively, and low mean absolute errors (MAE) of 14.4920 and 15.7284. This underscores the importance of combining graph-based spatial learning with multi-layer perceptrons to accurately model contaminant behavior under high-flow conditions. Conversely, models with less sophisticated architectures, such as the Dual Attention and CNN GNN MLP, struggled to achieve the same level of accuracy, with $R^2$ values of 0.8608 and 0.9089, and higher RMSE values of 29.4955 and 23.8654, respectively. This suggests that models that don't effectively fuse all three data modalities lose significant predictive power. 
+
+\input{ModelPerformanceTable}
+
+The winter season presented a more stable environment, characterized by reduced rainfall and lower water flow, which resulted in a marked improvement in overall model performance. Nearly all models achieved an $R^2$ greater than 0.95. The Transformer CNN GNN MLP model once again led the pack, achieving an impressive $R^2$ of 0.9721 and a remarkably low RMSE of 7.9921. This a 49.38\% reduction in RMSE compared to its performance in the rainy season, highlighting how much easier it is to model heavy metal concentrations when hydrological transport is minimized. The GNN MLP AE and GNN MLP models also showed significant improvement, with $R^2$ values of 0.9718 and 0.9705, and very low MAE values of 7.3433 and 8.2154, respectively. This high level of accuracy suggests that during the winter, the spatial distribution of heavy metals is largely governed by stable, predictable factors such as sediment composition and proximity to sources, making the modeling task more straightforward. The CNN GNN MLP PG model also showed a notable jump in performance, achieving an $R^2$ of 0.9541 and a very low SMAPE of 4.9237, indicating highly accurate predictions relative to the magnitude of observed values. The consistent top performance of the Transformer CNN GNN MLP model across both seasons highlights its robust architecture and its ability to effectively handle complex, multi-modal data under varying environmental conditions, making it a highly reliable tool for environmental monitoring.
+
+
+\begin{comment}
+\begin{figure}[h!] 
+\centering            % Centers the image on the page
+\includegraphics[width=17cm, height=17cm]{RainyWinterGroundTruthSediment.png}  % Replace with your image file path and name
+\caption{Seasonal Ground Truth and Model Predicted ecological risk index (RI)}  % Optional: Add a caption
+\label{fig:image1}  % Optional: Label for referencing the image
+\end{figure}
+\end{comment}
+
+\subsection{Source Apportionment in Rainy Season}
+
+The ensemble models for the rainy season reveal a complex set of drivers for heavy metal contamination, with a strong emphasis on textile, tannery, and brick kiln activities. The Transformer CNN GNN MLP model showed that CNN raster patches were the most important feature with a high permutation importance of 0.258, indicating that the detailed, fine-scale spatial variability of features associated with these sources is a primary driver of risk. LIME analysis further reinforced this, with high values of IDW Cu (\(>\)0.91) and IDW Pb (\(>\)0.63) being major drivers of high-risk predictions, with importance scores of 40.68 and 37.53, respectively. These specific heavy metals are known to be byproducts of industrial processes such as those found in textile and tannery operations. The GNN MLP Autoencoder model further reinforced the significance of geochemical features, with the overall MLP branch having an importance of 2.10 and IDW Pb (0.321), IDW Cu (0.116), and IDW Ni (0.104) being the most influential individual features. The model also showed that IDW Cd (0.043) and IDW Clay (0.036) were significant features. A key insight from this model is that while the number of industries and brick kilns may not always correlate directly with higher risk at every location, their influence is significant and location-specific, as evidenced by the negative LIME importance scores for Number of Industry \(> 1.00\) (-5.17), indicating that their impact on RI is more complex than a simple linear relationship. The CNN GNN MLP with PMF GWR model's permutation importance analysis highlighted Num Brick Field (0.0057) and IDW Silt (0.0056) as the top features, while LIME confirmed that high IDW Cd (\(>\)0.13) and IDW Pb (\(>\)0.63) were positively correlated with risk, with importance scores of 0.38 and 0.16. The co-occurrence of high importance for interpolated heavy metals and anthropogenic features, particularly in the LIME analysis, strongly suggests that textile, tannery, and brick kiln activities are the probable sources of the heavy metal contamination, with their impact modulated by environmental factors like silt content and fine-scale spatial variations captured by the CNN rasters.
+
+\begin{comment}
+\begin{figure}[h!] 
+\centering            % Centers the image on the page
+\includegraphics[width=17cm, height=17cm]{WinterRainy.png}  % Replace with your image file path and name
+\caption{Permutation and LIME feature importance of top three performed model of rainy and winter season.}  % Optional: Add a caption
+\label{fig:image2}  % Optional: Label for referencing the image
+\end{figure}
+\end{comment}
+
+
+\subsection{Source Apportionment in Winter Season}
+
+The ensemble models for the winter season reveal that interpolated heavy metal concentrations and fine-scale spatial features are the primary drivers of the sediment risk index (RI), with a direct link to anthropogenic sources. The Transformer CNN GNN MLP model, through permutation importance, identified IDW Pb (0.2298) and IDW Fe (0.2049) as the most influential features, with CNN All Rasters (0.1421) also having high importance, indicating the crucial role of fine-scale spatial variability. This is further validated by the LIME analysis, where IDW Pb (291.3201), IDW Fe (229.6694), IDW Cd (174.8315), and IDW Ni (151.1109) were found to be the most significant contributors to high-risk predictions. The GNN MLP Autoencoder model reinforced these findings, with IDW Pb having an exceptionally high permutation importance of 1.8036, and its LIME analysis showing IDW Fe (2.6344), IDW Pb (1.9294), and IDW Cu (1.7351) as the top drivers of risk. This model also showed an unexpected positive importance for a low number of brick kilns (0.9112), suggesting a complex, non-linear relationship where other factors dominate in less-impacted areas. The GNN MLP model highlighted IDW Cd (0.2251) as its most important feature, and its LIME analysis provided a key insight into source attribution: a high positive importance for Hydro Dist Brick (3.1667) suggests that proximity to brick kilns directly contributes to increased RI. While the overall permutation importance of anthropogenic features like Num Industry (0.0012) and Num Brick Field (-0.0008) appears low, their influence is significant at a localized level, particularly for brick kilns. The consistent and high importance of IDW Pb, IDW Fe, IDW Ni, and IDW Cd across all models, combined with the LIME-based evidence of brick kiln proximity, strongly suggests that these heavy metals are the main contaminants which is also the main by product of tannery and textile industry, with heavy metals spatial distribution and concentration being the primary drivers of risk during the winter season.

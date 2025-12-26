@@ -1,0 +1,42 @@
+/Users/rakibhhridoy/Library/Python/3.9/lib/python/site-packages/google/api_core/_python_version_support.py:252: FutureWarning: You are using a Python version (3.9.6) past its end of life. Google will update google.api_core with critical bug fixes on a best-effort basis, but not with any other fixes or features. Please upgrade to the latest Python version, or at least Python 3.10, and then update google.api_core.
+  warnings.warn(message, FutureWarning)
+/Users/rakibhhridoy/Library/Python/3.9/lib/python/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+[2025-12-26 20:58:12] [INFO] Starting AlphaEarth Top 5 Models Analysis
+[2025-12-26 20:58:12] [INFO] Checking prerequisites...
+[2025-12-26 20:58:12] [INFO] ✓ jupyter installed
+An error occurred: module 'importlib.metadata' has no attribute 'packages_distributions'
+[2025-12-26 20:58:16] [INFO] ✓ tensorflow installed
+[2025-12-26 20:58:16] [INFO] ✓ pandas installed
+[2025-12-26 20:58:16] [INFO] ✓ numpy installed
+[2025-12-26 20:58:16] [INFO] ✓ earthengine-api installed
+[2025-12-26 20:58:16] [INFO] ✓ All prerequisites satisfied
+[2025-12-26 20:58:16] [INFO] Scheduling 5 model runs (Top 5 × 1 options × 1 seasons)
+[2025-12-26 20:58:17] [INFO] Running Winter [Transformer CNN GNN MLP] Option B...
+[2025-12-26 20:58:17] [INFO] Running Winter [GNN MLP AE] Option B...
+[2025-12-26 20:58:17] [INFO] Running Winter [Mixture of Experts] Option B...
+[2025-12-26 20:58:17] [INFO] Running Winter [Stacked CNN GNN MLP] Option B...
+[2025-12-26 20:58:17] [INFO] Running Winter [GNN MLP] Option B...
+
+================================================================================
+ALPHAEARTH TOP 5 MODELS - ANALYSIS REPORT
+================================================================================
+
+Execution Time: 0:00:04.442525
+
+Results (5 total):
+  error: 5
+
+By Season:
+  WINTER: 0/5 succeeded
+
+Failed Runs:
+  winter Transformer CNN GNN MLP.ipynb OptB: [Errno 2] No such file or directory: 'ju
+  winter GNN MLP AE.ipynb OptB: [Errno 2] No such file or directory: 'ju
+  winter Mixture of Experts.ipynb OptB: [Errno 2] No such file or directory: 'ju
+  winter Stacked CNN GNN MLP.ipynb OptB: [Errno 2] No such file or directory: 'ju
+  winter GNN MLP.ipynb OptB: [Errno 2] No such file or directory: 'ju
+
+================================================================================
+
+[2025-12-26 20:58:17] [INFO] Report saved: /Users/rakibhhridoy/Five_Rivers/claude_temp/ALPHAEARTH_TOP5_RESULTS_20251226_205817.txt
